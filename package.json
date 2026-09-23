@@ -1,0 +1,53 @@
+{
+  "name": "diff-wingman",
+  "productName": "Diff Wingman",
+  "version": "0.0.5",
+  "private": true,
+  "type": "module",
+  "main": "dist/server/electron/main.js",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "dev": "tsx watch src/server/index.ts",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/server/index.js",
+    "desktop:dev": "node scripts/check-desktop-node.cjs && pnpm build && electron .",
+    "desktop:package": "node scripts/check-desktop-node.cjs && pnpm build && electron-forge package",
+    "desktop:make": "node scripts/check-desktop-node.cjs && pnpm build && electron-forge make",
+    "check:git": "node --import tsx --test tests/git.test.ts",
+    "check:guide": "node --import tsx --test tests/guide.test.ts",
+    "check:server": "node --import tsx --test tests/server.test.ts",
+    "check:v2": "node --import tsx --test tests/live.test.ts tests/v2-server.test.ts",
+    "check:v3": "node --import tsx --test tests/v3-symbols.test.ts tests/v3-report.test.ts",
+    "check:v4": "node --import tsx --test tests/v4-verification.test.ts",
+    "check:v4:docker": "node --import tsx --test tests/v4-docker-live.test.ts",
+    "check:v5": "node --import tsx --test tests/v5-gitlab.test.ts"
+  },
+  "dependencies": {
+    "@babel/parser": "7.29.8",
+    "@babel/types": "7.29.8",
+    "diff": "5.2.2",
+    "express": "5.1.0",
+    "monaco-editor": "0.55.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "5.9.3",
+    "zod": "3.25.76",
+    "zod-to-json-schema": "3.25.0"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "@types/diff": "5.2.3",
+    "@types/express": "5.0.3",
+    "@types/node": "22.7.5",
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.4.1",
+    "electron": "^44.4.3",
+    "tsx": "4.20.6",
+    "vite": "6.4.3"
+  }
+}
