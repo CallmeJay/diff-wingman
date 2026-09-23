@@ -44,6 +44,18 @@ function canonicalMrUrl(input: string): string | null {
       ? `${url.origin}/${match[1]}/-/merge_requests/${match[2]}` : null;
   } catch { return null; }
 }
+// GitLab 导入只提示对应的人工恢复动作，不能替用户配置凭证或获取本地提交。
+function gitlabImportNextStep(problem: string): string {
+  if (problem.includes('缺少 MR 提交'))
+    return '请在所选本地仓库自行获取提示的 MR 提交，再重新导入；本工具不会执行 git fetch。';
+  if (problem.includes('无权读取此 MR') || problem.includes('GitLab Token') || problem.includes('REVIEW_HELPER_GITLAB_HOST'))
+    return '请在启动工具的环境中核对只读令牌的 MR 读取权限，以及 REVIEW_HELPER_GITLAB_HOST 与 MR 域名是否一致，重启后再试。';
+  if (problem.includes('Git 远端不一致'))
+    return '请选择与 MR 地址对应的本地 Git 仓库，或核对该仓库已配置的远端。';
+  if (problem.includes('无法连接 GitLab'))
+    return '请检查当前网络与 MR 链接，再重新导入。';
+  return '请核对 MR 链接、所选本地仓库及错误详情后重试。';
+}
 const fileStatusLabel: Record<FileStatus, string> = {
   unread: '未阅读', in_progress: '审查中', question: '有疑问', reviewed: '已审查',
 };
@@ -767,6 +779,7 @@ export function App() {
   const [pickingRepo, setPickingRepo] = useState(false);
   const [sourceKind, setSourceKind] = useState<'local' | 'gitlab'>('local');
   const [mrUrl, setMrUrl] = useState('');
+  const [importError, setImportError] = useState('');
   const [previousReviewId, setPreviousReviewId] = useState('');
   const [mode, setMode] = useState<SnapshotMode>('commits');
   const [base, setBase] = useState('');
@@ -813,6 +826,7 @@ export function App() {
   const [task, setTask] = useState<TaskStatus | null>(null);
   const [hunkMode, setHunkMode] = useState<'all' | 'on_demand' | null>(null);
   const [symbolPick, setSymbolPick] = useState<SymbolPick | null>(null);
+  const [symbolImpactError, setSymbolImpactError] = useState('');
   const [symbolImpact, setSymbolImpact] = useState<SymbolImpact | null>(null);
   const [symbolImpactOpen, setSymbolImpactOpen] = useState(false);
   const [symbolImpactLoading, setSymbolImpactLoading] = useState(false);
@@ -833,6 +847,8 @@ export function App() {
   const [verificationOptions, setVerificationOptions] = useState<VerificationOptions | null>(null);
   const [verificationOptionError, setVerificationOptionError] = useState('');
   const [verificationCaseId, setVerificationCaseId] = useState('');
+  const [verificationScope, setVerificationScope] = useState<'related' | 'all'>('related');
+  const [verificationQuery, setVerificationQuery] = useState('');
   const [verificationScript, setVerificationScript] = useState('');
   const [verificationTrigger, setVerificationTrigger] = useState('');
   const [verificationExpected, setVerificationExpected] = useState('');
@@ -974,6 +990,8 @@ export function App() {
     setVerificationOptions(null);
     setVerificationOptionError('');
     setVerificationCaseId('');
+    setVerificationScope('related');
+    setVerificationQuery('');
     setVerificationScript('');
     setVerificationTrigger('');
     setVerificationExpected('');
@@ -1046,6 +1064,28 @@ export function App() {
     return state?.status !== 'confirmed' || state.guideFingerprint !== review?.guideFingerprint;
   };
   const claimByKey = new Map(claims.map((claim) => [claim.key, claim]));
+  const verificationCases = verificationOptions?.cases ?? [];
+  const caseChangeIds = (item: VerificationCase) => {
+    if (item.id.startsWith('claim:')) return claimByKey.get(item.id.slice(6))?.changeIds ?? [];
+    const question = /^question:(\d+):\d+$/.exec(item.id);
+    return question ? review?.guide?.groups[Number(question[1])]?.changeIds ?? [] : [];
+  };
+  // 导读判断沿用已有 changeIds 归属；只筛选待核对项，不改变验证任务和人工记录。
+  const unresolvedCases = verificationCases.filter(isCaseUnresolved);
+  const activeChangeId = readingPosition?.changeId;
+  const hunkCases = activeChangeId
+    ? unresolvedCases.filter((item) => caseChangeIds(item).includes(activeChangeId)) : [];
+  const featureCases = navigation === 'guide' && group
+    ? unresolvedCases.filter((item) => caseChangeIds(item).some((id) => group.changeIds.includes(id))) : [];
+  const relatedCases = hunkCases.length ? hunkCases : featureCases;
+  const relatedSource = hunkCases.length ? '当前 hunk' : featureCases.length ? '当前功能' : '当前 hunk 或功能';
+  const searchTerm = verificationQuery.trim().toLocaleLowerCase();
+  const shownVerificationCases = (verificationScope === 'related' ? relatedCases :
+    verificationCases.filter((item) => `${item.title} ${item.focus}`.toLocaleLowerCase().includes(searchTerm)))
+    .slice().sort((a, b) => Number(isCaseUnresolved(b)) - Number(isCaseUnresolved(a)));
+  const selectedVerificationCase = verificationCases.find((item) => item.id === verificationCaseId);
+  const selectedCaseOutsideScope = selectedVerificationCase &&
+    !shownVerificationCases.some((item) => item.id === selectedVerificationCase.id);
   const noteKey = file ? `file:${file.id}` : 'overview';
   const draftKey = `${snapshot?.id}:${noteKey}`;
   const note = drafts[draftKey] ?? review?.notes[noteKey] ?? '';
@@ -1150,6 +1190,8 @@ export function App() {
     setSnapshotFormOpen(false);
     setHunkMode(null);
     setSymbolPick(null);
+    setSymbolImpactError('');
+    setImportError('');
     setSymbolImpact(null);
     setSymbolImpactOpen(false);
     setFreshness(null);
@@ -1206,6 +1248,7 @@ export function App() {
     event.preventDefault();
     setCreating(true);
     setError('');
+    setImportError('');
     const request = ++loadCounter.current;
     try {
       const value = await api<SavedReview>(
@@ -1226,9 +1269,11 @@ export function App() {
         },
       );
       if (request === loadCounter.current) openReview(value);
-      setHistory(await api<ReviewSummary[]>('/api/reviews'));
+      try { setHistory(await api<ReviewSummary[]>('/api/reviews')); }
+      catch (error) { setError(message(error)); }
     } catch (error) {
-      setError(message(error));
+      if (sourceKind === 'gitlab') setImportError(message(error));
+      else setError(message(error));
     } finally {
       setCreating(false);
     }
@@ -1570,6 +1615,7 @@ export function App() {
     if (!snapshot || symbolImpactLoading) return;
     setSymbolImpactLoading(true);
     setError('');
+    setSymbolImpactError('');
     try {
       const result = await api<SymbolImpact>(`/api/reviews/${snapshot.id}/symbol-impact`, {
         method: 'POST', body: { path: pick.path, side: pick.side, line: pick.line,
@@ -1600,8 +1646,12 @@ export function App() {
           limitations: [...new Set([...current.limitations, ...result.limitations])] };
       });
       setSymbolImpactOpen(true);
-    } catch (error) { setError(message(error)); }
+    } catch (error) { setSymbolImpactError(message(error)); }
     finally { setSymbolImpactLoading(false); }
+  }
+  function selectSymbol(pick: SymbolPick) {
+    setSymbolPick(pick);
+    setSymbolImpactError('');
   }
   async function navigateImpactLocation(location: SymbolLocation, fileOnly = false) {
     if (!snapshot) return;
@@ -1989,7 +2039,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.11</span>
+          <span className="version-tag">v0.0.12</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -2029,6 +2079,7 @@ export function App() {
                   value={repo}
                   onChange={(event) => {
                     setRepo(event.target.value);
+                    setImportError('');
                     setPreviousReviewId('');
                     setUntracked([]);
                     setSelectedUntracked([]);
@@ -2052,7 +2103,7 @@ export function App() {
               <select
                 aria-label="来源"
                 value={sourceKind}
-                onChange={(event) => setSourceKind(event.target.value as 'local' | 'gitlab')}
+                onChange={(event) => { setSourceKind(event.target.value as 'local' | 'gitlab'); setImportError(''); }}
               >
                 <option value="local">本地 Git 版本</option>
                 <option value="gitlab">GitLab MR（只读）</option>
@@ -2066,7 +2117,7 @@ export function App() {
                     required
                     type="url"
                     value={mrUrl}
-                    onChange={(event) => { setMrUrl(event.target.value); setPreviousReviewId(''); }}
+                    onChange={(event) => { setMrUrl(event.target.value); setPreviousReviewId(''); setImportError(''); }}
                     placeholder="https://gitlab.example.com/group/project/-/merge_requests/1"
                     spellCheck={false}
                     autoComplete="off"
@@ -2080,6 +2131,9 @@ export function App() {
                       <option key={item.id} value={item.id}>diff v{item.gitlabVersionId} · {item.gitlabUrl} · {short(item.id)}</option>)}
                   </select>
                 </label>
+                <div className="gitlab-import-help">
+                  私有 MR：在启动工具的环境中配置与 MR 域名一致的 <code>REVIEW_HELPER_GITLAB_HOST</code> 和具备读取权限的只读 <code>REVIEW_HELPER_GITLAB_TOKEN</code>。所选本地仓库须已有 MR 的基线与目标提交；缺少时请自行获取，本工具不会自动 fetch 或发布评论。
+                </div>
               </>
             ) : (
               <label>
@@ -2215,6 +2269,12 @@ export function App() {
                 </>
               )}
             </button>
+            {sourceKind === 'gitlab' && importError && (
+              <div className="gitlab-import-error" role="alert">
+                <strong>导入失败：{importError}</strong>
+                <p>{gitlabImportNextStep(importError)}</p>
+              </div>
+            )}
           </form>
           <div className="scope-note">
             <span className="tiny-check">✓</span>
@@ -2969,8 +3029,12 @@ export function App() {
                             <button type="button" disabled={symbolImpactLoading} onClick={() => void loadSymbolImpact(symbolPick)}>
                               {symbolImpactLoading ? '正在分析…' : '查看影响链'}
                             </button></>
-                          : <span>选中源码中的完整 JS/TS 标识符，可按需查看影响链</span>}
+                          : <span>在源码中选中完整的 JS/TS 标识符，再点击“查看影响链”。</span>}
                       {symbolImpact && <button type="button" onClick={() => setSymbolImpactOpen(true)}>返回影响链</button>}
+                      {(!snapshot.mode || snapshot.mode === 'commits') && (
+                        <span className="symbol-pick-help">精确关系是固定源码中的符号引用；静态或文本候选仍需人工核对。两者均不证明运行时可达。</span>
+                      )}
+                      {symbolImpactError && <span className="symbol-pick-error" role="alert">无法查看影响链：{symbolImpactError}</span>}
                     </div>
                     {file && showOneFile && (
                       <div className="code-versions">
@@ -3008,14 +3072,14 @@ export function App() {
                             onLine={(side, line) => chooseLine(side, line, item)}
                             comments={commentMarkers(review, item)}
                             featureChangeIds={focusedChangeIds}
-                            onSymbol={setSymbolPick}
+                            onSymbol={selectSymbol}
                           />
                         ))}
                       </div>
                     ) : file && !file.issue && !showWhitespaceChanges ? (
-                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} featureChangeIds={focusedChangeIds} onSymbol={setSymbolPick} />
+                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} featureChangeIds={focusedChangeIds} onSymbol={selectSymbol} />
                     ) : (
-                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} featureChangeIds={focusedChangeIds} onSymbol={setSymbolPick} />
+                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} featureChangeIds={focusedChangeIds} onSymbol={selectSymbol} />
                     )}
                     <div className="code-footer">
                       <span>只读源码</span>
@@ -3377,6 +3441,22 @@ export function App() {
                               {verificationOptions.scripts.length === 0 && (
                                 <p className="muted small">目标 commit 中没有可选的检查脚本。</p>
                               )}
+                              <div className="verification-case-scope" role="group" aria-label="判断范围">
+                                <button type="button" aria-pressed={verificationScope === 'related'}
+                                  onClick={() => setVerificationScope('related')}>当前相关 · {relatedCases.length}</button>
+                                <button type="button" aria-pressed={verificationScope === 'all'}
+                                  onClick={() => setVerificationScope('all')}>全部判断 · {verificationCases.length}</button>
+                              </div>
+                              {verificationScope === 'all' ? (
+                                <input className="verification-case-search" aria-label="搜索全部判断"
+                                  value={verificationQuery} onChange={(event) => setVerificationQuery(event.target.value)}
+                                  placeholder="搜索判断标题或内容" />
+                              ) : <p className="muted small">优先显示当前 hunk 的待核对判断；无匹配时显示当前功能。当前范围：{relatedSource}。</p>}
+                              {shownVerificationCases.length === 0 && (
+                                <p className="muted small">{verificationScope === 'related'
+                                  ? '当前范围没有待核对判断；可切换到全部判断搜索。'
+                                  : '没有匹配的判断。'}</p>
+                              )}
                               <label>
                                 待核对判断
                                 <select
@@ -3385,12 +3465,10 @@ export function App() {
                                   onChange={(event) => setVerificationCaseId(event.target.value)}
                                 >
                                   <option value="">请选择</option>
-                                  {[...verificationOptions.cases]
-                                    .sort(
-                                      (a, b) =>
-                                        Number(isCaseUnresolved(b)) - Number(isCaseUnresolved(a)),
-                                    )
-                                    .map((item) => (
+                                  {selectedCaseOutsideScope && <option value={selectedVerificationCase.id}>
+                                    已选 · {selectedVerificationCase.title}
+                                  </option>}
+                                  {shownVerificationCases.map((item) => (
                                       <option key={item.id} value={item.id}>
                                         {isCaseUnresolved(item) ? '待核对 · ' : ''}
                                         {item.title}

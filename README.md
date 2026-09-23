@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.0.11-3f684c" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.0.12-3f684c" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-3f684c" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-%3E%3D20.19-3f684c" />
   <img alt="Electron" src="https://img.shields.io/badge/Electron-44-3f684c" />
@@ -31,10 +31,10 @@ Diff Wingman 是一个本地代码审查工具，适合在 AI 参与开发后梳
 | 按功能改动总览 | 从阅读路线展开功能对应的全部文件与变更块，点击跳转并突出当前功能的 Git hunk；可用的提交描述仅作为归纳线索 |
 | 阅读工作台 | 打开快照后收起建档侧栏，保留重新选择入口；AI 面板直接展示功能清单与归类数量，代码区直接切换并排/内联 |
 | 逐块理解 | 每个 hunk 的结构化解释卡、证据来源、可展开的覆盖矩阵和独立人工理解状态；“已核实”需填写依据 |
-| 影响上下文 | 为 JS、TS、JSX、TSX 变更补充函数范围、静态引用和固定提交树中的符号影响链 |
+| 影响上下文 | 为 JS、TS、JSX、TSX 变更补充函数范围、静态引用和固定提交树中的符号影响链；源码处提示选择方式与证据级别 |
 | 人工审查 | 文件与变更块审查状态、本地评论、笔记、逐条判断、核实依据和 Markdown 审查报告 |
-| 隔离验证 | 在无网络、只读源码的 Docker 容器中运行选定的项目脚本 |
-| GitLab MR | 只读导入固定 MR 版本；手动选旧版增量复审，精确继承人工状态与评论位置 |
+| 隔离验证 | 优先查看当前 hunk 的待核对判断，切换到全部判断并搜索；人工选择后在无网络、只读源码的 Docker 容器中运行项目脚本 |
+| GitLab MR | 只读导入固定 MR 版本；手动选旧版增量复审，精确继承人工状态与评论位置；导入表单提示配置和本地提交前提 |
 | 评论闭环 | 单行、多行、文件级评论，类型、修改建议、解决状态、总览与 diff 定位 |
 
 ## 快速开始
@@ -120,7 +120,7 @@ export REVIEW_HELPER_GITLAB_TOKEN=your_read_only_token
 - 静态引用和 AI 解释都是审查线索，不代表运行时一定可达，最终结论由 reviewer 确认。
 - 源码快照、导读、笔记和报告保存在本机；默认目录不会提交到 Git。
 
-本版范围与未验证项见[v0.0.11 范围与契约](docs/v11-scope.md)和[验收记录](docs/v11-verification.md)。
+本版范围与未验证项见[v0.0.12 范围与契约](docs/v12-scope.md)和[验收记录](docs/v12-verification.md)。
 
 ## 配置
 
@@ -182,6 +182,7 @@ docs/          版本范围、验收记录和开发计划
 - [第九版范围](docs/v9-scope.md) / [验收记录](docs/v9-verification.md)
 - [第十版范围](docs/v10-scope.md) / [验收记录](docs/v10-verification.md)
 - [第十一版范围](docs/v11-scope.md) / [验收记录](docs/v11-verification.md)
+- [第十二版范围](docs/v12-scope.md) / [验收记录](docs/v12-verification.md)
 
 ## 开源许可
 
