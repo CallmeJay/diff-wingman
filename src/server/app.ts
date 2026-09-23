@@ -1,17 +1,21 @@
 import express from 'express';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import type { Requirement, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
+import type { Requirement, ReviewFile, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
 import { listClaims } from '../shared/claims.js';
+import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import {
   answerSchema,
   claimStateInputSchema,
   commentDraftEditSchema,
   commentDraftInputSchema,
+  fileStateInputSchema,
   gitlabImportInputSchema,
   guideSchema,
+  localCommentInputSchema,
   noteInputSchema,
   questionInputSchema,
+  readingPositionInputSchema,
   reviewStateInputSchema,
   snapshotInputSchema,
   verificationInputSchema,
@@ -94,6 +98,11 @@ export function createApp(options: {
       snapshot.requirements,
     );
     return current.id === snapshot.id;
+  };
+  const sourceAt = (file: ReviewFile, side: 'before' | 'after', line: number) => {
+    const source = side === 'before' ? file.before : file.after;
+    if (source === null || line > sourceLineCount(source))
+      throw new AppError(400, '评论或阅读位置不属于此快照的源码。');
   };
 
   app.disable('x-powered-by');
@@ -469,6 +478,98 @@ export function createApp(options: {
       review.notes[input.key] = input.text;
     });
     res.json({ saved: true });
+  });
+
+  app.put('/api/reviews/:id/file-states', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = fileStateInputSchema.parse(req.body);
+    if (!(await isFresh(reviewId)))
+      throw new AppError(409, '源码已变化，请创建新快照后再更新文件状态。');
+    await store.update(reviewId, (review) => {
+      const file = review.snapshot.files.find((item) => item.id === input.fileId);
+      if (!file || fileFingerprint(file) !== input.fingerprint)
+        throw new AppError(409, '文件内容身份已变化，请重新打开快照。');
+      review.fileStates ??= {};
+      // 未阅读是旧记录的默认状态，删除显式状态避免自动完成或跨版本继承。
+      if (input.status === 'unread') delete review.fileStates[input.fileId];
+      else review.fileStates[input.fileId] = {
+        status: input.status,
+        fingerprint: input.fingerprint,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    res.json(await store.get(reviewId));
+  });
+
+  app.put('/api/reviews/:id/reading-position', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = readingPositionInputSchema.parse(req.body);
+    await store.update(reviewId, (review) => {
+      const file = review.snapshot.files.find((item) => item.id === input.fileId);
+      if (!file) throw new AppError(400, '阅读文件不属于此快照。');
+      sourceAt(file, input.side, input.line);
+      if (input.changeId && !file.changes.some((item) => item.id === input.changeId))
+        throw new AppError(400, '变更块不属于此文件。');
+      review.readingPosition = input;
+    });
+    res.json({ saved: true });
+  });
+
+  app.post('/api/reviews/:id/local-comments', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = localCommentInputSchema.parse(req.body);
+    if (!/\S/.test(input.body) || !/\S/.test(input.evidence))
+      throw new AppError(400, '评论问题和人工依据都不能为空。');
+    if (!(await isFresh(reviewId)))
+      throw new AppError(409, '源码已变化，请创建新快照后再评论。');
+    await store.update(reviewId, (review) => {
+      const file = review.snapshot.files.find((item) => item.id === input.fileId);
+      if (!file || fileFingerprint(file) !== input.fingerprint)
+        throw new AppError(409, '文件内容身份已变化，请重新打开快照。');
+      sourceAt(file, input.side, input.line);
+      review.localComments ??= [];
+      if (review.localComments.length >= 100)
+        throw new AppError(422, '每份快照最多保存 100 条本地评论。');
+      const now = new Date().toISOString();
+      review.localComments.push({
+        ...input,
+        id: randomUUID(),
+        path: file.path,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    res.json(await store.get(reviewId));
+  });
+
+  app.put('/api/reviews/:id/local-comments/:commentId', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = commentDraftEditSchema.parse(req.body);
+    if (!/\S/.test(input.body) || !/\S/.test(input.evidence))
+      throw new AppError(400, '评论问题和人工依据都不能为空。');
+    if (!(await isFresh(reviewId)))
+      throw new AppError(409, '源码已变化，请创建新快照后再编辑评论。');
+    await store.update(reviewId, (review) => {
+      const comment = review.localComments?.find((item) => item.id === req.params.commentId);
+      if (!comment) throw new AppError(404, '未找到此本地评论。');
+      const file = review.snapshot.files.find((item) => item.id === comment.fileId);
+      if (!file || fileFingerprint(file) !== comment.fingerprint)
+        throw new AppError(409, '评论对应的文件内容身份已变化。');
+      comment.body = input.body;
+      comment.evidence = input.evidence;
+      comment.updatedAt = new Date().toISOString();
+    });
+    res.json(await store.get(reviewId));
+  });
+
+  app.delete('/api/reviews/:id/local-comments/:commentId', async (req, res) => {
+    const reviewId = id(req.params.id);
+    await store.update(reviewId, (review) => {
+      if (!review.localComments?.some((item) => item.id === req.params.commentId))
+        throw new AppError(404, '未找到此本地评论。');
+      review.localComments = review.localComments.filter((item) => item.id !== req.params.commentId);
+    });
+    res.json(await store.get(reviewId));
   });
 
   async function startTask(

@@ -116,6 +116,32 @@ export interface ClaimReviewState {
   updatedAt: string;
 }
 
+export interface FileReviewState {
+  status: 'in_progress' | 'question' | 'reviewed';
+  fingerprint: string;
+  updatedAt: string;
+}
+
+export interface ReadingPosition {
+  fileId: string;
+  side: Side;
+  line: number;
+  changeId?: string;
+}
+
+export interface LocalComment {
+  id: string;
+  fileId: string;
+  fingerprint: string;
+  path: string;
+  side: Side;
+  line: number;
+  body: string;
+  evidence: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Answer {
   statements: Statement[];
   openQuestions: string[];
@@ -125,6 +151,9 @@ export interface SavedReview {
   snapshot: Snapshot;
   gitlab?: GitLabMergeRequest;
   commentDrafts?: CommentDraft[];
+  localComments?: LocalComment[];
+  fileStates?: Record<string, FileReviewState>;
+  readingPosition?: ReadingPosition;
   guide: Guide | null;
   groupHashes?: string[];
   notes: Record<string, string>;

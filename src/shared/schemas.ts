@@ -128,6 +128,28 @@ export const noteInputSchema = z
   .object({ key: z.string().min(1).max(100), text: z.string().max(20_000) })
   .strict();
 
+export const fileStateInputSchema = z.object({
+  fileId: z.string().min(1).max(100),
+  fingerprint: z.string().min(1).max(10000),
+  status: z.enum(['unread', 'in_progress', 'question', 'reviewed']),
+}).strict();
+
+export const readingPositionInputSchema = z.object({
+  fileId: z.string().min(1).max(100),
+  side: z.enum(['before', 'after']),
+  line: z.number().int().positive(),
+  changeId: z.string().min(1).max(100).optional(),
+}).strict();
+
+export const localCommentInputSchema = z.object({
+  fileId: z.string().min(1).max(100),
+  fingerprint: z.string().min(1).max(10000),
+  side: z.enum(['before', 'after']),
+  line: z.number().int().positive(),
+  body: z.string().min(1).max(5000),
+  evidence: z.string().min(1).max(5000),
+}).strict();
+
 export const verificationInputSchema = z
   .object({
     caseId: z.string().min(1).max(100),

@@ -4,6 +4,8 @@ import type {
   ClaimReviewState,
   CodexStatus,
   CommentDraft,
+  LocalComment,
+  ReadingPosition,
   ReviewSummary,
   ReviewFile,
   RepositoryVersionOption,
@@ -18,12 +20,41 @@ import type {
   VerificationTaskStatus,
 } from '../shared/types.js';
 import { listClaims, type ReviewClaim } from '../shared/claims.js';
+import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { api } from './api.js';
-import { CodePanel, StaticDiffPanel } from './CodePanel.js';
+import { CodePanel, StaticDiffPanel, type DiffJump } from './CodePanel.js';
+import { currentFileStatus, defaultFileFilters, fileStatusCounts, filterFiles, type FileFilters, type FileStatus } from './file-review.js';
 
 const short = (value: string) => value.slice(0, 8);
 const basename = (value: string) => value.split('/').filter(Boolean).at(-1) ?? value;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const fileStatusLabel: Record<FileStatus, string> = {
+  unread: '未阅读', in_progress: '审查中', question: '有疑问', reviewed: '已审查',
+};
+const filterStorageKey = 'diff-wingman:v6:file-filters';
+const lastReviewStorageKey = 'diff-wingman:v6:last-review';
+
+function readFileFilters(): FileFilters {
+  try {
+    const value = JSON.parse(localStorage.getItem(filterStorageKey) ?? 'null') as Partial<FileFilters> | null;
+    if (!value || typeof value.query !== 'string' || !['all', 'added', 'modified', 'deleted', 'renamed'].includes(value.change ?? '') ||
+      !['all', 'unreviewed', 'unread', 'in_progress', 'question', 'reviewed'].includes(value.status ?? '') ||
+      !['all', 'source', 'test', 'config', 'style', 'docs', 'lock'].includes(value.category ?? '') ||
+      typeof value.comments !== 'boolean' || typeof value.pending !== 'boolean' || typeof value.unavailable !== 'boolean')
+      return defaultFileFilters;
+    return value as FileFilters;
+  } catch {
+    // 浏览器禁用存储或旧偏好格式不兼容时，仅恢复筛选默认值，不影响审查记录。
+    return defaultFileFilters;
+  }
+}
+
+// 旧版导读和判断请求返回整份快照时，保留同时写入的文件状态与本地评论。
+function mergeReviewCore(current: SavedReview | null, updated: SavedReview): SavedReview {
+  if (current?.snapshot.id !== updated.snapshot.id) return updated;
+  return { ...updated, fileStates: current.fileStates ?? updated.fileStates,
+    localComments: current.localComments ?? updated.localComments };
+}
 
 function Icon({
   name,
@@ -413,11 +444,15 @@ function FileNavItem({
   selected,
   onSelect,
   treeDepth,
+  reviewStatus,
+  historicalStatus,
 }: {
   item: ReviewFile;
   selected: boolean;
   onSelect: (id: string) => void;
   treeDepth?: number;
+  reviewStatus: FileStatus;
+  historicalStatus?: FileStatus;
 }) {
   return (
     <button
@@ -447,6 +482,9 @@ function FileNavItem({
           </>
         )}
       </span>
+      <span className={`file-review-badge ${reviewStatus}`} title={historicalStatus ? `待重核 · 原${fileStatusLabel[historicalStatus]}` : undefined}>
+        {historicalStatus ? `待重核 · 原${fileStatusLabel[historicalStatus]}` : fileStatusLabel[reviewStatus]}
+      </span>
     </button>
   );
 }
@@ -462,10 +500,16 @@ function FileTree({
   files,
   selectedFile,
   onSelect,
+  review,
+  fresh,
+  stale,
 }: {
   files: ReviewFile[];
   selectedFile: string | null;
   onSelect: (id: string) => void;
+  review: SavedReview;
+  fresh: boolean;
+  stale: boolean;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // 树仅按快照里的目标路径分组；文件身份与点击行为仍使用原来的 id。
@@ -514,6 +558,8 @@ function FileTree({
         selected={selectedFile === item.id}
         onSelect={onSelect}
         treeDepth={depth}
+        reviewStatus={currentFileStatus(review, item, fresh)}
+        historicalStatus={stale ? review.fileStates?.[item.id]?.status : undefined}
       />
     ));
   const renderFolder = (node: FileTreeNode, depth: number): React.ReactNode => {
@@ -574,6 +620,9 @@ function FileDiffCard({
   scrollRoot,
   onToggle,
   onLine,
+  showFullFile,
+  jump,
+  onPosition,
 }: {
   file: ReviewFile;
   base: string;
@@ -585,6 +634,9 @@ function FileDiffCard({
   scrollRoot: React.RefObject<HTMLDivElement>;
   onToggle: () => void;
   onLine: (side: Side, line: number) => void;
+  showFullFile: boolean;
+  jump: DiffJump | null;
+  onPosition: (side: Side, line: number) => void;
 }) {
   const card = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
@@ -614,9 +666,9 @@ function FileDiffCard({
           )}
           {visible ? (
             file.issue ? (
-              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} />
+              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} />
             ) : (
-              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} />
+              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} />
             )
           ) : (
             <div className="file-diff-placeholder" aria-hidden="true" />
@@ -650,6 +702,14 @@ export function App() {
   const reviewId = useRef<string | undefined>();
   reviewId.current = review?.snapshot.id;
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const selectedFileRef = useRef<string | null>(null);
+  selectedFileRef.current = selectedFile;
+  const [readingPosition, setReadingPosition] = useState<ReadingPosition | null>(null);
+  const [jump, setJump] = useState<DiffJump | null>(null);
+  const jumpCounter = useRef(0);
+  const persistedPosition = useRef('');
+  const positionWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const fileStateWriteQueue = useRef<Promise<void>>(Promise.resolve());
   const [selectedGroup, setSelectedGroup] = useState(0);
   const [activeRef, setActiveRef] = useState<SourceRef | null>(null);
   const [navigation, setNavigation] = useState<'files' | 'guide'>('files');
@@ -657,6 +717,9 @@ export function App() {
   const [diffLayout, setDiffLayout] = useState<'side-by-side' | 'inline'>('side-by-side');
   const [showWhitespaceChanges, setShowWhitespaceChanges] = useState(true);
   const [showOneFile, setShowOneFile] = useState(true);
+  const [showFullFile, setShowFullFile] = useState(false);
+  const [filters, setFilters] = useState<FileFilters>(readFileFilters);
+  const fileSearchRef = useRef<HTMLInputElement>(null);
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(() => new Set());
   const allFilesScroll = useRef<HTMLDivElement>(null);
   const [creating, setCreating] = useState(false);
@@ -691,6 +754,12 @@ export function App() {
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftExport, setDraftExport] = useState<string | null>(null);
+  const [commentTarget, setCommentTarget] = useState<ReadingPosition | null>(null);
+  const [editingLocalCommentId, setEditingLocalCommentId] = useState<string | null>(null);
+  const [savingLocalComment, setSavingLocalComment] = useState(false);
+  const commentSectionRef = useRef<HTMLDetailsElement>(null);
+  const commentBodyRef = useRef<HTMLTextAreaElement>(null);
+  const mrPanelRef = useRef<HTMLDetailsElement>(null);
   const loadCounter = useRef(0);
 
   useEffect(() => {
@@ -705,6 +774,13 @@ export function App() {
         setStatus(nextStatus);
         setHistory(nextHistory);
         if (tasks[0]) setTask(tasks[0]);
+        try {
+          const lastId = localStorage.getItem(lastReviewStorageKey);
+          if (lastId && nextHistory.some((item) => item.id === lastId) && loadCounter.current === 0)
+            void api<SavedReview>(`/api/reviews/${lastId}`).then((value) => {
+              if (alive && loadCounter.current === 0) openReview(value);
+            }).catch((error) => { if (alive) setError(message(error)); });
+        } catch { /* 存储不可用时仍可从最近快照手动打开。 */ }
       })
       .catch((error) => {
         if (alive) setError(message(error));
@@ -713,6 +789,11 @@ export function App() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem(filterStorageKey, JSON.stringify(filters)); }
+    catch { /* 浏览器拒绝本地偏好存储时，当前会话仍可筛选。 */ }
+  }, [filters]);
 
   // 仓库确定后只读本地引用；延迟手输路径请求，取消旧请求避免切仓时显示过期候选项。
   useEffect(() => {
@@ -764,7 +845,7 @@ export function App() {
           ]);
           if (!alive) return;
           if (reviewId.current === next.reviewId) {
-            setReview(updated);
+            setReview((current) => current?.snapshot.id === next.reviewId ? mergeReviewCore(current, updated) : current);
             setReportPreview(null);
           }
           setHistory(recent);
@@ -824,7 +905,7 @@ export function App() {
             try {
               const updated = await api<SavedReview>(`/api/reviews/${next.reviewId}`);
               if (alive && reviewId.current === next.reviewId) {
-                setReview(updated);
+                setReview((current) => current?.snapshot.id === next.reviewId ? mergeReviewCore(current, updated) : current);
                 setReportPreview(null);
               }
             } catch (error) {
@@ -852,6 +933,11 @@ export function App() {
     setCollapsedFiles(new Set());
   }, [snapshot?.id]);
   const file = snapshot?.files.find((item) => item.id === selectedFile) ?? null;
+  const fileStatesFresh = freshness?.fresh === true || Boolean(review && !review.gitlab && (!snapshot?.mode || snapshot.mode === 'commits'));
+  const visibleFiles = review ? filterFiles(review, filters, fileStatesFresh) : [];
+  const statusCounts = review ? fileStatusCounts(review, fileStatesFresh) : { reviewed: 0, question: 0, unreviewed: 0 };
+  const visibleHunks = visibleFiles.flatMap((item) => item.changes.filter((change) => change.id.includes(':hunk-')).map((change) => ({ file: item, change })));
+  const activeHunkIndex = visibleHunks.findIndex(({ change }) => change.id === readingPosition?.changeId);
   const group = review?.guide?.groups[selectedGroup];
   const busy = requesting || task?.state === 'running';
   const changes = snapshot?.files.flatMap((item) => item.changes) ?? [];
@@ -866,6 +952,22 @@ export function App() {
   const draftKey = `${snapshot?.id}:${noteKey}`;
   const note = drafts[draftKey] ?? review?.notes[noteKey] ?? '';
   const noteChanged = note !== (review?.notes[noteKey] ?? '');
+
+  useEffect(() => {
+    if (!review || !readingPosition) return;
+    const serialized = JSON.stringify(readingPosition);
+    if (persistedPosition.current === `${review.snapshot.id}:${serialized}`) return;
+    const savingId = review.snapshot.id;
+    const timer = setTimeout(() => {
+      const write = positionWriteQueue.current.catch(() => undefined).then(() =>
+        api(`/api/reviews/${savingId}/reading-position`, { method: 'PUT', body: readingPosition }));
+      positionWriteQueue.current = write.then(() => undefined, () => undefined);
+      void write
+        .then(() => { persistedPosition.current = `${savingId}:${serialized}`; })
+        .catch((error) => { if (savingId === reviewId.current) setError(message(error)); });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [review?.snapshot.id, readingPosition]);
   const selectedHash = review?.groupHashes?.[selectedGroup];
   const savedState = selectedHash ? review?.reviewStates?.[selectedHash] : undefined;
   const groupStatusLabel = (index: number) => {
@@ -941,7 +1043,21 @@ export function App() {
     setSelectedUntracked(value.snapshot.untracked ?? []);
     setUntracked([]);
     setReview(value);
-    setSelectedFile(value.snapshot.files[0]?.id ?? null);
+    setFreshness(null);
+    const savedPosition = value.readingPosition;
+    const savedFile = value.snapshot.files.find((item) => item.id === savedPosition?.fileId);
+    const source = savedPosition?.side === 'before' ? savedFile?.before : savedFile?.after;
+    const restored = savedPosition && savedFile && source !== null && source !== undefined &&
+      savedPosition.line <= sourceLineCount(source) ? savedPosition : null;
+    const firstFile = value.snapshot.files[0];
+    const first = firstFile && firstPosition(firstFile);
+    const initialPosition = restored ?? (firstFile && first ? positionFor(firstFile, first.side, first.line) : null);
+    setSelectedFile(initialPosition?.fileId ?? firstFile?.id ?? null);
+    setReadingPosition(initialPosition);
+    persistedPosition.current = restored ? `${value.snapshot.id}:${JSON.stringify(restored)}` : '';
+    setJump(initialPosition ? { side: initialPosition.side, line: initialPosition.line, token: ++jumpCounter.current } : null);
+    try { localStorage.setItem(lastReviewStorageKey, value.snapshot.id); }
+    catch { /* 最近快照恢复不可用时，已加载的快照仍可阅读。 */ }
     setActiveRef(null);
     setSelectedGroup(0);
     setNavigation(value.guide ? 'guide' : 'files');
@@ -959,6 +1075,8 @@ export function App() {
     setDraftEvidence('');
     setEditingDraftId(null);
     setDraftExport(null);
+    setCommentTarget(null);
+    setEditingLocalCommentId(null);
   };
   async function loadReview(id: string) {
     const request = ++loadCounter.current;
@@ -1047,7 +1165,7 @@ export function App() {
           evidence: reviewEvidence,
         },
       });
-      setReview(updated);
+      setReview((current) => current?.snapshot.id === review.snapshot.id ? mergeReviewCore(current, updated) : current);
       setReportPreview(null);
     } catch (error) {
       setError(message(error));
@@ -1068,7 +1186,7 @@ export function App() {
         method: 'PUT',
         body: { key, guideFingerprint: review.guideFingerprint, status, evidence },
       });
-      setReview((current) => (current?.snapshot.id === savingId ? updated : current));
+      setReview((current) => (current?.snapshot.id === savingId ? mergeReviewCore(current, updated) : current));
       setReportPreview(null);
       return true;
     } catch (error) {
@@ -1123,13 +1241,14 @@ export function App() {
   async function saveDraft(event: React.FormEvent) {
     event.preventDefault();
     if (!snapshot?.id || !review?.gitlab) return;
+    const savingId = snapshot.id;
     setSavingDraft(true);
     setError('');
     try {
       const updated = await api<SavedReview>(
         editingDraftId
-          ? `/api/reviews/${snapshot.id}/drafts/${editingDraftId}`
-          : `/api/reviews/${snapshot.id}/drafts`,
+          ? `/api/reviews/${savingId}/drafts/${editingDraftId}`
+          : `/api/reviews/${savingId}/drafts`,
         {
           method: editingDraftId ? 'PUT' : 'POST',
           body: editingDraftId
@@ -1143,13 +1262,15 @@ export function App() {
               },
         },
       );
-      setReview(updated);
-      setDraftBody('');
-      setDraftEvidence('');
-      setDraftLine('');
-      setEditingDraftId(null);
-      setDraftExport(null);
-      setReportPreview(null);
+      if (reviewId.current === savingId) {
+        setReview((current) => current?.snapshot.id === savingId ? { ...current, commentDrafts: updated.commentDrafts } : current);
+        setDraftBody('');
+        setDraftEvidence('');
+        setDraftLine('');
+        setEditingDraftId(null);
+        setDraftExport(null);
+        setReportPreview(null);
+      }
     } catch (error) {
       setError(message(error));
     } finally {
@@ -1158,18 +1279,63 @@ export function App() {
   }
   async function deleteDraft(draft: CommentDraft) {
     if (!snapshot?.id) return;
+    const savingId = snapshot.id;
     setError('');
     try {
-      const updated = await api<SavedReview>(`/api/reviews/${snapshot.id}/drafts/${draft.id}`, {
+      const updated = await api<SavedReview>(`/api/reviews/${savingId}/drafts/${draft.id}`, {
         method: 'DELETE',
       });
-      setReview(updated);
-      setDraftExport(null);
-      setReportPreview(null);
-      if (editingDraftId === draft.id) setEditingDraftId(null);
+      if (reviewId.current === savingId) {
+        setReview((current) => current?.snapshot.id === savingId ? { ...current, commentDrafts: updated.commentDrafts } : current);
+        setDraftExport(null);
+        setReportPreview(null);
+        if (editingDraftId === draft.id) setEditingDraftId(null);
+      }
     } catch (error) {
       setError(message(error));
     }
+  }
+  async function saveLocalComment(event: React.FormEvent) {
+    event.preventDefault();
+    if (!review || !commentTarget || !file) return;
+    const savingId = review.snapshot.id;
+    setSavingLocalComment(true);
+    setError('');
+    try {
+      const updated = await api<SavedReview>(
+        editingLocalCommentId
+          ? `/api/reviews/${savingId}/local-comments/${editingLocalCommentId}`
+          : `/api/reviews/${savingId}/local-comments`,
+        {
+          method: editingLocalCommentId ? 'PUT' : 'POST',
+          body: editingLocalCommentId
+            ? { body: draftBody, evidence: draftEvidence }
+            : { fileId: file.id, fingerprint: fileFingerprint(file), side: commentTarget.side,
+                line: commentTarget.line, body: draftBody, evidence: draftEvidence },
+        },
+      );
+      if (reviewId.current === savingId) {
+        setReview((current) => current?.snapshot.id === savingId ? { ...current, localComments: updated.localComments } : current);
+        setCommentTarget(null);
+        setEditingLocalCommentId(null);
+        setDraftBody('');
+        setDraftEvidence('');
+      }
+    } catch (error) { setError(message(error)); }
+    finally { setSavingLocalComment(false); }
+  }
+  async function deleteLocalComment(comment: LocalComment) {
+    if (!snapshot) return;
+    const savingId = snapshot.id;
+    try {
+      const updated = await api<SavedReview>(`/api/reviews/${savingId}/local-comments/${comment.id}`, { method: 'DELETE' });
+      if (reviewId.current === savingId)
+        setReview((current) => current?.snapshot.id === savingId ? { ...current, localComments: updated.localComments } : current);
+      if (editingLocalCommentId === comment.id) {
+        setEditingLocalCommentId(null);
+        setCommentTarget(null);
+      }
+    } catch (error) { setError(message(error)); }
   }
   async function copyDraft(draft: CommentDraft) {
     if (!snapshot?.id) return;
@@ -1275,6 +1441,39 @@ export function App() {
   useEffect(() => {
     if (!showOneFile && selectedFile) scrollToDiffFile(selectedFile);
   }, [showOneFile, selectedFile, snapshot?.id]);
+  function positionFor(sourceFile: ReviewFile, side: Side, line: number): ReadingPosition {
+    const hunks = sourceFile.changes.filter((item) => item.id.includes(':hunk-'));
+    const nearest = hunks.reduce<{ id: string; distance: number } | null>((best, item) => {
+      const start = side === 'before' ? item.oldStart : item.newStart;
+      const count = side === 'before' ? item.oldLines : item.newLines;
+      const distance = line < start ? start - line : Math.max(0, line - (start + count - 1));
+      return !best || distance < best.distance ? { id: item.id, distance } : best;
+    }, null);
+    return { fileId: sourceFile.id, side, line, ...(nearest ? { changeId: nearest.id } : {}) };
+  }
+  function jumpTo(sourceFile: ReviewFile, side: Side, line: number) {
+    if (!showOneFile) {
+      setCollapsedFiles((current) => {
+        if (!current.has(sourceFile.id)) return current;
+        const next = new Set(current);
+        next.delete(sourceFile.id);
+        return next;
+      });
+    }
+    setSelectedFile(sourceFile.id);
+    setActiveRef(null);
+    setReadingPosition(positionFor(sourceFile, side, line));
+    setJump({ side, line, token: ++jumpCounter.current });
+    setNoteFeedback('');
+  }
+  function firstPosition(sourceFile: ReviewFile): { side: Side; line: number } | null {
+    const first = sourceFile.changes.find((item) => item.id.includes(':hunk-'));
+    if (first && first.newLines > 0) return { side: 'after', line: first.newStart };
+    if (first && first.oldLines > 0) return { side: 'before', line: first.oldStart };
+    if (sourceFile.after && sourceLineCount(sourceFile.after)) return { side: 'after', line: 1 };
+    if (sourceFile.before && sourceLineCount(sourceFile.before)) return { side: 'before', line: 1 };
+    return null;
+  }
   function chooseFile(id: string) {
     // 列表与树形视图共享文件选择，切换视图不改变当前 diff 和人工记录。
     if (!showOneFile) {
@@ -1286,9 +1485,16 @@ export function App() {
       });
       requestAnimationFrame(() => scrollToDiffFile(id));
     }
-    setSelectedFile(id);
-    setActiveRef(null);
-    setNoteFeedback('');
+    const sourceFile = snapshot?.files.find((item) => item.id === id);
+    const start = sourceFile && firstPosition(sourceFile);
+    if (sourceFile && start) jumpTo(sourceFile, start.side, start.line);
+    else {
+      setSelectedFile(id);
+      setActiveRef(null);
+      setReadingPosition(null);
+      setJump(null);
+      setNoteFeedback('');
+    }
   }
   function showRef(ref: SourceRef) {
     if (!snapshot) return;
@@ -1297,6 +1503,10 @@ export function App() {
     );
     setSelectedFile(matching?.id ?? null);
     setActiveRef(ref);
+    if (matching) {
+      setReadingPosition(positionFor(matching, ref.side, ref.startLine));
+      setJump({ side: ref.side, line: ref.startLine, token: ++jumpCounter.current });
+    }
     setNoteFeedback('');
   }
   function chooseGroup(index: number) {
@@ -1305,13 +1515,14 @@ export function App() {
       review?.guide?.groups[index].changeIds.includes(change.id),
     );
     if (firstChange) {
-      setSelectedFile(firstChange.fileId);
-      setActiveRef(null);
+      const sourceFile = snapshot?.files.find((item) => item.id === firstChange.fileId);
+      if (sourceFile) jumpTo(sourceFile, firstChange.newLines ? 'after' : 'before', firstChange.newLines ? firstChange.newStart : firstChange.oldStart);
     }
     setNoteFeedback('');
   }
   function chooseLine(side: Side, line: number, sourceFile: ReviewFile | null = file) {
     if (!sourceFile || !snapshot) return;
+    setReadingPosition(positionFor(sourceFile, side, line));
     if (sourceFile.id !== selectedFile) {
       setSelectedFile(sourceFile.id);
       setActiveRef(null);
@@ -1339,6 +1550,125 @@ export function App() {
       if (index !== undefined && index >= 0) setSelectedGroup(index);
     }
   }
+
+  function recordScrollPosition(sourceFile: ReviewFile, side: Side, line: number) {
+    if (selectedFileRef.current !== sourceFile.id || line < 1) return;
+    setReadingPosition((current) => {
+      if (current?.fileId === sourceFile.id && current.side === side && current.line === line) return current;
+      return positionFor(sourceFile, side, line);
+    });
+  }
+  function navigateFile(direction: -1 | 1) {
+    if (!visibleFiles.length) return;
+    const index = visibleFiles.findIndex((item) => item.id === selectedFile);
+    const next = index < 0 ? (direction === 1 ? 0 : visibleFiles.length - 1) :
+      (index + direction + visibleFiles.length) % visibleFiles.length;
+    chooseFile(visibleFiles[next].id);
+  }
+  function navigateHunk(direction: -1 | 1) {
+    if (!visibleHunks.length) return;
+    const index = activeHunkIndex < 0 ? (direction === 1 ? -1 : 0) : activeHunkIndex;
+    const target = visibleHunks[(index + direction + visibleHunks.length) % visibleHunks.length];
+    const side: Side = target.change.newLines > 0 ? 'after' : 'before';
+    jumpTo(target.file, side, side === 'after' ? target.change.newStart : target.change.oldStart);
+  }
+  function nextUnreviewedFile() {
+    if (!snapshot || !review) return;
+    const index = snapshot.files.findIndex((item) => item.id === selectedFile);
+    const candidates = visibleFiles.filter((item) => ['unread', 'in_progress'].includes(currentFileStatus(review, item, fileStatesFresh)));
+    const target = candidates.find((item) => snapshot.files.indexOf(item) > index) ?? candidates[0];
+    if (target) chooseFile(target.id);
+  }
+  async function updateFileStatus(status: FileStatus) {
+    if (!review || !file || !fileStatesFresh) return;
+    const savingId = review.snapshot.id;
+    const targetFile = file;
+    try {
+      const write = fileStateWriteQueue.current.catch(() => undefined).then(() =>
+        api<SavedReview>(`/api/reviews/${savingId}/file-states`, {
+          method: 'PUT', body: { fileId: targetFile.id, fingerprint: fileFingerprint(targetFile), status },
+        }));
+      fileStateWriteQueue.current = write.then(() => undefined, () => undefined);
+      const updated = await write;
+      if (reviewId.current === savingId) setReview((current) => {
+        if (current?.snapshot.id !== savingId) return current;
+        const fileStates = { ...current.fileStates };
+        const saved = updated.fileStates?.[targetFile.id];
+        if (saved) fileStates[targetFile.id] = saved;
+        else delete fileStates[targetFile.id];
+        return { ...current, fileStates };
+      });
+    } catch (error) { setError(message(error)); }
+  }
+  function openComment() {
+    if (!file || !review || freshness?.fresh !== true && !fileStatesFresh) return;
+    const first = firstPosition(file);
+    const target = readingPosition?.fileId === file.id ? readingPosition :
+      first ? positionFor(file, first.side, first.line) : null;
+    if (!target) { setError('此文件没有可评论的文本行。'); return; }
+    if (review.gitlab) {
+      const mrFile = review.gitlab.files.find((item) => item.path === file.path);
+      if (!mrFile || !(target.side === 'after' ? mrFile.addedLines : mrFile.deletedLines).includes(target.line)) {
+        setError('GitLab 草稿只能定位到新增或删除行，请先点击对应代码行。');
+        return;
+      }
+      setDraftPath(file.path);
+      setDraftSide(target.side);
+      setDraftLine(String(target.line));
+      if (mrPanelRef.current) {
+        mrPanelRef.current.open = true;
+        mrPanelRef.current.scrollIntoView({ block: 'nearest' });
+      }
+    } else {
+      setCommentTarget(target);
+      setEditingLocalCommentId(null);
+      setDraftBody('');
+      setDraftEvidence('');
+      requestAnimationFrame(() => {
+        if (commentSectionRef.current) {
+          commentSectionRef.current.open = true;
+          commentSectionRef.current.scrollIntoView({ block: 'nearest' });
+        }
+        commentBodyRef.current?.focus();
+      });
+    }
+  }
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!review || event.metaKey || event.ctrlKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable="true"], .monaco-editor')) return;
+      if (!event.altKey && event.key === '/') {
+        event.preventDefault();
+        setNavigation('files');
+        fileSearchRef.current?.focus();
+      } else if (event.altKey && event.key === 'ArrowUp') {
+        event.preventDefault(); navigateFile(-1);
+      } else if (event.altKey && event.key === 'ArrowDown') {
+        event.preventDefault(); navigateFile(1);
+      } else if (event.altKey && event.key === 'ArrowLeft') {
+        event.preventDefault(); navigateHunk(-1);
+      } else if (event.altKey && event.key === 'ArrowRight') {
+        event.preventDefault(); navigateHunk(1);
+      } else if (event.altKey && event.key.toLowerCase() === 'r') {
+        event.preventDefault(); void updateFileStatus('reviewed');
+      } else if (event.altKey && event.key.toLowerCase() === 'c') {
+        event.preventDefault(); openComment();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  });
+
+  useEffect(() => {
+    // 筛选恢复后选中可见文件；导读定位到清单外源码时保留原引用位置。
+    if (!review || navigation !== 'files' || activeRef) return;
+    if (selectedFile && visibleFiles.some((item) => item.id === selectedFile)) return;
+    const first = visibleFiles[0];
+    if (first) chooseFile(first.id);
+    else { setSelectedFile(null); setReadingPosition(null); setJump(null); }
+  }, [review, filters, navigation, selectedFile, activeRef, freshness?.fresh]);
 
   const renderClaim = (key: string) => {
     const claim = claimByKey.get(key);
@@ -1377,7 +1707,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.5</span>
+          <span className="version-tag">v0.0.6</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -1787,7 +2117,7 @@ export function App() {
                 </div>
               </div>
               {review.gitlab && (
-                <details className="mr-panel">
+                <details className="mr-panel" ref={mrPanelRef}>
                   <summary>
                     GitLab MR !{review.gitlab.iid} · 本地评论草稿{' '}
                     {review.commentDrafts?.length ?? 0} 条
@@ -1986,6 +2316,41 @@ export function App() {
                   </div>
                 </details>
               )}
+              {!review.gitlab && <details className="mr-panel" ref={commentSectionRef}>
+                <summary>当前文件的本地评论 · {(review.localComments ?? []).filter((item) => item.fileId === file?.id).length}</summary>
+                <div className="mr-panel-content">
+                  <p>评论只保存在当前快照，不会发布到代码托管平台。先点击 diff 行，再选择“评论当前位置”。</p>
+                  {commentTarget && commentTarget.fileId === file?.id && <form className="mr-draft-form" onSubmit={(event) => void saveLocalComment(event)}>
+                    <strong className="mr-wide">{file?.path}:{commentTarget.line} · {commentTarget.side === 'before' ? '修改前' : '修改后'}</strong>
+                    <label className="mr-wide">问题描述
+                      <textarea ref={commentBodyRef} aria-label="本地评论问题描述" required maxLength={5000} rows={2} value={draftBody} onChange={(event) => setDraftBody(event.target.value)} />
+                    </label>
+                    <label className="mr-wide">人工验证依据
+                      <textarea aria-label="本地评论人工依据" required maxLength={5000} rows={2} value={draftEvidence} onChange={(event) => setDraftEvidence(event.target.value)} />
+                    </label>
+                    <div className="mr-actions mr-wide">
+                      <button className="secondary-button" type="submit" disabled={savingLocalComment || !fileStatesFresh || !draftBody.trim() || !draftEvidence.trim()}>{savingLocalComment ? '保存中…' : editingLocalCommentId ? '更新本地评论' : '保存本地评论'}</button>
+                      <button className="secondary-button" type="button" onClick={() => { setCommentTarget(null); setEditingLocalCommentId(null); setDraftBody(''); setDraftEvidence(''); }}>取消</button>
+                    </div>
+                  </form>}
+                  {(review.localComments ?? []).filter((item) => item.fileId === file?.id).map((comment) => <div className="mr-draft-item" key={comment.id}>
+                    <strong>{comment.path}:{comment.line} · {comment.side === 'before' ? '修改前' : '修改后'}</strong>
+                    <span>{fileStatesFresh ? '未发布 · 本地评论' : '待重核 · 旧快照评论'}</span>
+                    <p>{comment.body}</p><p>人工依据：{comment.evidence}</p>
+                    <div className="mr-actions">
+                      <button className="secondary-button" type="button" onClick={() => { if (file) jumpTo(file, comment.side, comment.line); }}>定位</button>
+                      <button className="secondary-button" type="button" disabled={!fileStatesFresh} onClick={() => {
+                        setCommentTarget({ fileId: comment.fileId, side: comment.side, line: comment.line });
+                        setEditingLocalCommentId(comment.id);
+                        setDraftBody(comment.body);
+                        setDraftEvidence(comment.evidence);
+                        requestAnimationFrame(() => commentBodyRef.current?.focus());
+                      }}>编辑</button>
+                      <button className="secondary-button" type="button" onClick={() => void deleteLocalComment(comment)}>删除</button>
+                    </div>
+                  </div>)}
+                </div>
+              </details>}
               {(review.gitlab || (snapshot.mode && snapshot.mode !== 'commits')) &&
                 freshness?.fresh === false && (
                   <div className="stale-banner" role="status">
@@ -2040,23 +2405,50 @@ export function App() {
                         </button>
                       </div>
                     )}
+                    {navigation === 'files' && <div className="file-filters">
+                      <input ref={fileSearchRef} aria-label="搜索变更文件" placeholder="搜索文件名或路径 · /" value={filters.query}
+                        onChange={(event) => setFilters((value) => ({ ...value, query: event.target.value }))} />
+                      <div className="file-filter-selects">
+                        <select aria-label="按变更类型筛选" value={filters.change} onChange={(event) => setFilters((value) => ({ ...value, change: event.target.value as FileFilters['change'] }))}>
+                          <option value="all">全部变更</option><option value="added">新增</option><option value="modified">修改</option><option value="deleted">删除</option><option value="renamed">重命名</option>
+                        </select>
+                        <select aria-label="按审查状态筛选" value={filters.status} onChange={(event) => setFilters((value) => ({ ...value, status: event.target.value as FileFilters['status'] }))}>
+                          <option value="all">全部状态</option><option value="unreviewed">未审查</option><option value="unread">未阅读</option><option value="in_progress">审查中</option><option value="question">有疑问</option><option value="reviewed">已审查</option>
+                        </select>
+                        <select aria-label="按文件类型筛选" value={filters.category} onChange={(event) => setFilters((value) => ({ ...value, category: event.target.value as FileFilters['category'] }))}>
+                          <option value="all">全部类型</option><option value="source">源码</option><option value="test">测试</option><option value="config">配置</option><option value="style">样式</option><option value="docs">文档</option><option value="lock">锁文件</option>
+                        </select>
+                      </div>
+                      <div className="file-filter-flags">
+                        <label><input type="checkbox" checked={filters.comments} onChange={(event) => setFilters((value) => ({ ...value, comments: event.target.checked }))} />有评论</label>
+                        <label><input type="checkbox" checked={filters.pending} onChange={(event) => setFilters((value) => ({ ...value, pending: event.target.checked }))} />待确认</label>
+                        <label><input type="checkbox" checked={filters.unavailable} onChange={(event) => setFilters((value) => ({ ...value, unavailable: event.target.checked }))} />无法分析</label>
+                      </div>
+                      <div className="file-review-counts">{freshness === null && (review.gitlab || snapshot.mode && snapshot.mode !== 'commits') ? '源码状态校验中…' : `已审查 ${statusCounts.reviewed} · 有疑问 ${statusCounts.question} · 未审查 ${statusCounts.unreviewed}`}</div>
+                      <button type="button" className="next-unreviewed" onClick={nextUnreviewedFile} disabled={!visibleFiles.some((item) => ['unread', 'in_progress'].includes(currentFileStatus(review, item, fileStatesFresh)))}>下一个未审查文件</button>
+                    </div>}
                     <div className={`nav-content${navigation === 'files' && fileView === 'tree' ? ' tree-mode' : ''}`}>
                       {navigation === 'files' ? (
-                        fileView === 'list' ? (
-                          snapshot.files.map((item) => (
+                        visibleFiles.length === 0 ? <p className="muted small">没有符合条件的文件。</p> : fileView === 'list' ? (
+                          visibleFiles.map((item) => (
                             <FileNavItem
                               key={item.id}
                               item={item}
                               selected={selectedFile === item.id}
                               onSelect={chooseFile}
+                              reviewStatus={currentFileStatus(review, item, fileStatesFresh)}
+                              historicalStatus={freshness?.fresh === false ? review.fileStates?.[item.id]?.status : undefined}
                             />
                           ))
                         ) : (
                           <FileTree
                             key={snapshot.id}
-                            files={snapshot.files}
+                            files={visibleFiles}
                             selectedFile={selectedFile}
                             onSelect={chooseFile}
+                            review={review}
+                            fresh={fileStatesFresh}
+                            stale={freshness?.fresh === false}
                           />
                         )
                       ) : review.guide ? (
@@ -2105,7 +2497,7 @@ export function App() {
                       )}
                     </div>
                     <div className="nav-footer">
-                      {changes.length} 处变更 · {snapshot.refs.length} 个源码片段
+                      显示 {visibleFiles.length}/{snapshot.files.length} 个文件 · {changes.length} 处变更
                     </div>
                   </nav>
                   <section className="code-section">
@@ -2122,7 +2514,7 @@ export function App() {
                       {!showOneFile && (
                         <div className="diff-expand-controls" role="group" aria-label="文件内容展开状态">
                           <button type="button" title="展开全部文件" aria-label="展开全部文件" onClick={() => setCollapsedFiles(new Set())}>展开</button>
-                          <button type="button" title="折叠全部文件" aria-label="折叠全部文件" onClick={() => setCollapsedFiles(new Set(snapshot.files.map((item) => item.id)))}>折叠</button>
+                          <button type="button" title="折叠全部文件" aria-label="折叠全部文件" onClick={() => setCollapsedFiles(new Set(visibleFiles.map((item) => item.id)))}>折叠</button>
                         </div>
                       )}
                       <details className="diff-options">
@@ -2154,6 +2546,24 @@ export function App() {
                         </div>
                       </details>
                     </div>
+                    <div className="review-core-toolbar">
+                      <div className="review-core-navigation">
+                        <button type="button" onClick={() => navigateFile(-1)} disabled={!visibleFiles.length} title="上一个文件 · Alt+↑">上一文件</button>
+                        <button type="button" onClick={() => navigateFile(1)} disabled={!visibleFiles.length} title="下一个文件 · Alt+↓">下一文件</button>
+                        <button type="button" onClick={() => navigateHunk(-1)} disabled={!visibleHunks.length} title="上一个变更块 · Alt+←">上一变更</button>
+                        <button type="button" onClick={() => navigateHunk(1)} disabled={!visibleHunks.length} title="下一个变更块 · Alt+→">下一变更</button>
+                        <button type="button" onClick={() => setShowFullFile((value) => !value)} disabled={!file || Boolean(file.issue)}>{showFullFile ? '折叠上下文' : '展开完整文件'}</button>
+                      </div>
+                      <div className="review-core-state">
+                        <span className="hunk-range" title={visibleHunks[activeHunkIndex]?.change.label ?? ''}>{visibleHunks[activeHunkIndex]?.change.label ?? '无当前变更块'}</span>
+                        <select aria-label="当前文件审查状态" value={file ? currentFileStatus(review, file, fileStatesFresh) : 'unread'} disabled={!file || !fileStatesFresh}
+                          onChange={(event) => void updateFileStatus(event.target.value as FileStatus)}>
+                          <option value="unread">未阅读</option><option value="in_progress">审查中</option><option value="question">有疑问</option><option value="reviewed">已审查</option>
+                        </select>
+                        <button type="button" onClick={() => void updateFileStatus('reviewed')} disabled={!file || !fileStatesFresh} title="标记已审查 · Alt+R">已审查</button>
+                        <button type="button" onClick={openComment} disabled={!file || !fileStatesFresh || Boolean(file.issue)} title="当前位置创建评论 · Alt+C">评论当前位置</button>
+                      </div>
+                    </div>
                     {file && showOneFile && (
                       <div className="code-versions">
                         <span>修改前 · {short(snapshot.base)}</span>
@@ -2165,9 +2575,9 @@ export function App() {
                         重命名：{file.oldPath} → {file.path}
                       </div>
                     )}
-                    {!showOneFile && file ? (
+                    {!showOneFile ? (
                       <div className="all-files-scroll" ref={allFilesScroll}>
-                        {snapshot.files.map((item) => (
+                        {visibleFiles.map((item) => (
                           <FileDiffCard
                             key={item.id}
                             file={item}
@@ -2176,6 +2586,9 @@ export function App() {
                             activeRef={selectedFile === item.id ? activeRef : null}
                             diffLayout={diffLayout}
                             showWhitespaceChanges={showWhitespaceChanges}
+                            showFullFile={showFullFile}
+                            jump={selectedFile === item.id ? jump : null}
+                            onPosition={(side, line) => recordScrollPosition(item, side, line)}
                             expanded={!collapsedFiles.has(item.id)}
                             scrollRoot={allFilesScroll}
                             onToggle={() => setCollapsedFiles((current) => {
@@ -2189,9 +2602,9 @@ export function App() {
                         ))}
                       </div>
                     ) : file && !file.issue && !showWhitespaceChanges ? (
-                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} />
+                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} />
                     ) : (
-                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} />
+                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} />
                     )}
                     <div className="code-footer">
                       <span>只读源码</span>
