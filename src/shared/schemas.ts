@@ -154,6 +154,61 @@ export const hunkStateInputSchema = z.object({
   status: z.enum(['unread', 'in_progress', 'question', 'reviewed']),
 }).strict();
 
+export const hunkEvidenceSchema = z.object({
+  text: z.string().min(1).max(3000),
+  basis: z.enum(['source', 'requirement', 'mr', 'inference', 'pending']),
+  refIds: z.array(z.string()).max(12),
+  requirementId: z.string().optional(),
+  mrExcerpt: z.string().max(1000).optional(),
+}).strict();
+
+export const hunkExplanationSchema = z.object({
+  changeId: z.string(),
+  what: hunkEvidenceSchema,
+  before: hunkEvidenceSchema,
+  after: hunkEvidenceSchema,
+  impacts: z.array(hunkEvidenceSchema).max(8),
+  failures: z.array(hunkEvidenceSchema).max(8),
+  tests: z.array(hunkEvidenceSchema).max(8),
+  pending: z.array(hunkEvidenceSchema).max(8),
+}).strict();
+
+export const hunkExplanationBatchSchema = z.object({
+  cards: z.array(hunkExplanationSchema).max(20),
+}).strict();
+
+export const hunkUnderstandingInputSchema = z.object({
+  changeId: z.string().min(1).max(100),
+  status: z.enum(['unread', 'understood', 'question', 'verified']),
+  evidence: z.string().max(5000),
+  guideFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  explanationFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+export const guideGenerationInputSchema = z.object({
+  hunkMode: z.enum(['all', 'on_demand']).optional(),
+}).strict();
+
+export const hunkGenerationInputSchema = z.object({
+  changeId: z.string().min(1).max(100),
+}).strict();
+
+export const symbolImpactInputSchema = z.object({
+  path: z.string().min(1).max(4096),
+  side: z.enum(['before', 'after']),
+  line: z.number().int().positive(),
+  startColumn: z.number().int().positive(),
+  endColumn: z.number().int().positive(),
+  expand: z.boolean().optional(),
+}).strict().refine((value) => value.endColumn > value.startColumn, '请选择完整标识符。');
+
+export const symbolSourceInputSchema = z.object({
+  side: z.enum(['before', 'after']),
+  path: z.string().min(1).max(4096),
+  blobOid: z.string().regex(/^[a-f0-9]{40,64}$/),
+  line: z.number().int().positive(),
+}).strict();
+
 export const readingPositionInputSchema = z.object({
   fileId: z.string().min(1).max(100),
   side: z.enum(['before', 'after']),

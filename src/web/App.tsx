@@ -16,6 +16,8 @@ import type {
   SourceRef,
   Statement,
   TaskStatus,
+  SymbolImpact,
+  SymbolLocation,
   VerificationOptions,
   VerificationCase,
   VerificationTaskStatus,
@@ -24,7 +26,9 @@ import { listClaims, type ReviewClaim } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { hunkFingerprint } from '../shared/incremental.js';
 import { api } from './api.js';
-import { CodePanel, StaticDiffPanel, type CommentMarker, type DiffJump } from './CodePanel.js';
+import { CodePanel, StaticDiffPanel, type CommentMarker, type DiffJump, type SymbolPick } from './CodePanel.js';
+import { V8ReviewPanel } from './V8ReviewPanel.js';
+import { SymbolImpactPanel } from './SymbolImpactPanel.js';
 import { currentFileStatus, defaultFileFilters, fileStatusCounts, filterFiles, type FileFilters, type FileStatus } from './file-review.js';
 
 const short = (value: string) => value.slice(0, 8);
@@ -649,6 +653,7 @@ function FileDiffCard({
   jump,
   onPosition,
   comments,
+  onSymbol,
 }: {
   file: ReviewFile;
   base: string;
@@ -664,6 +669,7 @@ function FileDiffCard({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments: CommentMarker[];
+  onSymbol?: (selection: SymbolPick) => void;
 }) {
   const card = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
@@ -693,9 +699,9 @@ function FileDiffCard({
           )}
           {visible ? (
             file.issue ? (
-              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} />
+              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} onSymbol={onSymbol} />
             ) : (
-              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} />
+              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} onSymbol={onSymbol} />
             )
           ) : (
             <div className="file-diff-placeholder" aria-hidden="true" />
@@ -753,6 +759,11 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [task, setTask] = useState<TaskStatus | null>(null);
+  const [hunkMode, setHunkMode] = useState<'all' | 'on_demand' | null>(null);
+  const [symbolPick, setSymbolPick] = useState<SymbolPick | null>(null);
+  const [symbolImpact, setSymbolImpact] = useState<SymbolImpact | null>(null);
+  const [symbolImpactOpen, setSymbolImpactOpen] = useState(false);
+  const [symbolImpactLoading, setSymbolImpactLoading] = useState(false);
   const [error, setError] = useState('');
   const [question, setQuestion] = useState('');
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -1081,6 +1092,10 @@ export function App() {
     setSelectedUntracked(value.snapshot.untracked ?? []);
     setUntracked([]);
     setReview(value);
+    setHunkMode(null);
+    setSymbolPick(null);
+    setSymbolImpact(null);
+    setSymbolImpactOpen(false);
     setFreshness(null);
     const savedPosition = value.readingPosition;
     const savedFile = value.snapshot.files.find((item) => item.id === savedPosition?.fileId);
@@ -1457,16 +1472,99 @@ export function App() {
     }
   }
   async function generate() {
-    if (!snapshot || busy) return;
+    if (!snapshot || busy || !hunkMode) return;
     setRequesting(true);
     setError('');
     try {
-      setTask(await api<TaskStatus>(`/api/reviews/${snapshot.id}/guide`, { method: 'POST' }));
+      setTask(await api<TaskStatus>(`/api/reviews/${snapshot.id}/guide`, { method: 'POST', body: { hunkMode } }));
     } catch (error) {
       setError(message(error));
     } finally {
       setRequesting(false);
     }
+  }
+  // 单块解释沿用已有任务轮询和取消流程；只有明确触发时才调用 Codex。
+  async function generateHunk(changeId: string) {
+    if (!snapshot || busy) return;
+    setRequesting(true);
+    setError('');
+    try {
+      setTask(await api<TaskStatus>(`/api/reviews/${snapshot.id}/hunk-explanations`, {
+        method: 'POST', body: { changeId },
+      }));
+    } catch (error) {
+      setError(message(error));
+    } finally {
+      setRequesting(false);
+    }
+  }
+  async function updateHunkUnderstanding(changeId: string, status: 'unread' | 'understood' | 'question' | 'verified', evidence: string) {
+    if (!review?.guideFingerprint) return;
+    const card = review.hunkExplanations?.[changeId];
+    if (!card) return;
+    try {
+      const updated = await api<SavedReview>(`/api/reviews/${review.snapshot.id}/hunk-understanding`, {
+        method: 'PUT', body: { changeId, status, evidence, guideFingerprint: review.guideFingerprint,
+          explanationFingerprint: card.fingerprint },
+      });
+      setReview((current) => current?.snapshot.id === updated.snapshot.id ? mergeReviewCore(current, updated) : current);
+    } catch (error) { setError(message(error)); }
+  }
+  async function loadSymbolImpact(pick: SymbolPick, expand = false) {
+    if (!snapshot || symbolImpactLoading) return;
+    setSymbolImpactLoading(true);
+    setError('');
+    try {
+      const result = await api<SymbolImpact>(`/api/reviews/${snapshot.id}/symbol-impact`, {
+        method: 'POST', body: { path: pick.path, side: pick.side, line: pick.line,
+          startColumn: pick.startColumn, endColumn: pick.endColumn, expand },
+      });
+      if (reviewId.current !== result.snapshotId) return;
+      setSymbolImpact((current) => {
+        if (!expand || !current || current.snapshotId !== result.snapshotId) return result;
+        // 展开另一层时合并同一关系的固定位置，不能覆盖前一层已展示的证据。
+        const nodes = new Map(current.nodes.map((node) => [node.id, node]));
+        for (const node of result.nodes) {
+          const previous = nodes.get(node.id);
+          nodes.set(node.id, previous ? { ...previous, locations: [...previous.locations,
+            ...node.locations.filter((loc) => !previous.locations.some((old) => old.side === loc.side &&
+              old.blobOid === loc.blobOid && old.line === loc.line && old.column === loc.column))] } : node);
+        }
+        const relations = new Map(current.relations.map((relation) => [relation.id, relation]));
+        for (const relation of result.relations) {
+          const previous = relations.get(relation.id);
+          if (!previous) { relations.set(relation.id, relation); continue; }
+          const locations = [...previous.locations, ...relation.locations.filter((loc) => !previous.locations.some((old) =>
+            old.side === loc.side && old.blobOid === loc.blobOid && old.line === loc.line && old.column === loc.column))];
+          const sides = new Set(locations.map((loc) => loc.side));
+          relations.set(relation.id, { ...previous, locations,
+            change: sides.size === 2 ? 'unchanged' : sides.has('after') ? 'added' : 'removed' });
+        }
+        return { ...current, nodes: [...nodes.values()], relations: [...relations.values()],
+          limitations: [...new Set([...current.limitations, ...result.limitations])] };
+      });
+      setSymbolImpactOpen(true);
+    } catch (error) { setError(message(error)); }
+    finally { setSymbolImpactLoading(false); }
+  }
+  async function navigateImpactLocation(location: SymbolLocation, fileOnly = false) {
+    if (!snapshot) return;
+    const matching = snapshot.files.find((item) => location.side === 'before' ?
+      item.oldPath === location.path && item.oldOid === location.blobOid :
+      item.path === location.path && item.newOid === location.blobOid);
+    if (matching) {
+      if (fileOnly) chooseFile(matching.id);
+      else jumpTo(matching, location.side, location.line);
+      setSymbolImpactOpen(false);
+      return;
+    }
+    try {
+      const ref = await api<SourceRef>(`/api/reviews/${snapshot.id}/symbol-source`, {
+        method: 'POST', body: { side: location.side, path: location.path,
+          blobOid: location.blobOid, line: location.line },
+      });
+      if (reviewId.current === snapshot.id) { showRef(ref); setSymbolImpactOpen(false); }
+    } catch (error) { setError(message(error)); }
   }
   async function ask(event: React.FormEvent) {
     event.preventDefault();
@@ -1804,7 +1902,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.7</span>
+          <span className="version-tag">v0.0.8</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -2805,6 +2903,17 @@ export function App() {
                         <button type="button" onClick={openComment} disabled={!file || !fileStatesFresh || Boolean(file.issue)} title="当前位置创建评论 · Alt+C">评论当前位置</button>
                       </div>
                     </div>
+                    <div className="symbol-pick-bar">
+                      {snapshot.mode && snapshot.mode !== 'commits'
+                        ? <span>符号影响链支持两次提交或 GitLab MR 固定版本</span>
+                        : symbolPick
+                          ? <><span>已选符号：<strong>{symbolPick.name}</strong> · {symbolPick.path}:L{symbolPick.line}</span>
+                            <button type="button" disabled={symbolImpactLoading} onClick={() => void loadSymbolImpact(symbolPick)}>
+                              {symbolImpactLoading ? '正在分析…' : '查看影响链'}
+                            </button></>
+                          : <span>选中源码中的完整 JS/TS 标识符，可按需查看影响链</span>}
+                      {symbolImpact && <button type="button" onClick={() => setSymbolImpactOpen(true)}>返回影响链</button>}
+                    </div>
                     {file && showOneFile && (
                       <div className="code-versions">
                         <span>修改前 · {short(snapshot.base)}</span>
@@ -2840,13 +2949,14 @@ export function App() {
                             })}
                             onLine={(side, line) => chooseLine(side, line, item)}
                             comments={commentMarkers(review, item)}
+                            onSymbol={setSymbolPick}
                           />
                         ))}
                       </div>
                     ) : file && !file.issue && !showWhitespaceChanges ? (
-                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} />
+                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} onSymbol={setSymbolPick} />
                     ) : (
-                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} />
+                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} onSymbol={setSymbolPick} />
                     )}
                     <div className="code-footer">
                       <span>只读源码</span>
@@ -2867,9 +2977,16 @@ export function App() {
                     </div>
                     <div className="guide-scroll">
                       <div className="generate-block">
+                        <fieldset className="v8-generation-choice" disabled={busy}>
+                          <legend>生成解释的方式</legend>
+                          <label><input type="radio" name="hunk-mode" checked={hunkMode === 'all'}
+                            onChange={() => setHunkMode('all')} />整份生成：阅读路线完成后继续逐块生成，等待和额度开销更多</label>
+                          <label><input type="radio" name="hunk-mode" checked={hunkMode === 'on_demand'}
+                            onChange={() => setHunkMode('on_demand')} />逐块按需：先生成阅读路线，之后选择具体变更再生成解释</label>
+                        </fieldset>
                         <button
                           className="generate-button"
-                          disabled={busy || !status?.subscription}
+                          disabled={busy || !status?.subscription || !hunkMode}
                           onClick={() => void generate()}
                         >
                           <Icon name="spark" size={16} />
@@ -2900,6 +3017,18 @@ export function App() {
                           </details>
                         )}
                       </div>
+                      {review.guide && <V8ReviewPanel key={snapshot.id} review={review}
+                        changeId={readingPosition?.changeId} fresh={fileStatesFresh} stale={freshness?.fresh === false} busy={busy}
+                        canGenerate={Boolean(status?.subscription)}
+                        onGenerateHunk={(changeId) => void generateHunk(changeId)}
+                        onUnderstanding={updateHunkUnderstanding}
+                        onChange={(changeId) => {
+                          const selected = snapshot.files.find((item) => item.changes.some((change) => change.id === changeId));
+                          const change = selected?.changes.find((item) => item.id === changeId);
+                          if (selected && change) jumpTo(selected, change.newLines ? 'after' : 'before',
+                            change.newLines ? change.newStart : change.oldStart);
+                        }}
+                        onSource={showRef} />}
                       {review.guide ? (
                         <>
                           <p className="guide-overview">{review.guide.overview}</p>
@@ -3329,6 +3458,13 @@ export function App() {
                       </details>
                     </div>
                   </aside>
+                  {symbolImpact && <SymbolImpactPanel key={`${symbolImpact.snapshotId}:${symbolImpact.selected.locations[0]?.blobOid}:${symbolImpact.selected.locations[0]?.line}:${symbolImpact.selected.locations[0]?.column}`}
+                    impact={symbolImpact} review={review}
+                    open={symbolImpactOpen} loading={symbolImpactLoading}
+                    onClose={() => setSymbolImpactOpen(false)}
+                    onNavigate={(location, fileOnly) => void navigateImpactLocation(location, fileOnly)}
+                    onExpand={(location) => void loadSymbolImpact({ ...location,
+                      startColumn: location.column, name: '' }, true)} />}
                 </div>
               )}
             </>

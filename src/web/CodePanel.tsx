@@ -10,6 +10,7 @@ import { buildDiffBlocks, type DiffLine } from './diff-lines.js';
 
 export type DiffJump = { side: Side; line: number; token: number };
 export type CommentMarker = { side: Side; line: number; resolved: boolean };
+export type SymbolPick = { path: string; side: Side; line: number; startColumn: number; endColumn: number; name: string };
 
 (self as typeof self & { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
   getWorker: () => new EditorWorker(),
@@ -33,6 +34,7 @@ export function CodePanel({
   jump,
   onPosition,
   comments = [],
+  onSymbol,
 }: {
   file: ReviewFile | null;
   activeRef: SourceRef | null;
@@ -43,6 +45,7 @@ export function CodePanel({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments?: CommentMarker[];
+  onSymbol?: (selection: SymbolPick) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const diffEditor = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
@@ -54,6 +57,8 @@ export function CodePanel({
   lineHandler.current = onLine;
   const positionHandler = useRef(onPosition);
   positionHandler.current = onPosition;
+  const symbolHandler = useRef(onSymbol);
+  symbolHandler.current = onSymbol;
   const suppressScroll = useRef(false);
   const userScrollUntil = useRef(0);
   const related = !file && activeRef;
@@ -116,6 +121,19 @@ export function CodePanel({
         if (event.target.position) lineHandler.current(side, event.target.position.lineNumber);
       }),
     );
+    for (const side of ['before', 'after'] as const) {
+      const code = editors.current[side]!;
+      subscriptions.push(code.onDidChangeCursorSelection((event) => {
+        const selection = event.selection;
+        if (!symbolHandler.current || selection.isEmpty() || selection.startLineNumber !== selection.endLineNumber) return;
+        const model = code.getModel();
+        const word = model?.getWordAtPosition({ lineNumber: selection.startLineNumber, column: selection.startColumn });
+        if (!word || word.startColumn !== selection.startColumn || word.endColumn !== selection.endColumn) return;
+        symbolHandler.current({ path: side === 'before' ? file!.oldPath : file!.path, side,
+          line: selection.startLineNumber, startColumn: selection.startColumn,
+          endColumn: selection.endColumn, name: word.word });
+      }));
+    }
     // 只把人工滚动记录为阅读位置；Monaco 异步计算 diff 时也会改变 scrollTop。
     const markUserScroll = () => { userScrollUntil.current = Date.now() + 750; };
     const onEditorKey = (event: KeyboardEvent) => {
@@ -215,6 +233,7 @@ export function StaticDiffPanel({
   jump,
   onPosition,
   comments = [],
+  onSymbol,
 }: {
   file: ReviewFile;
   diffLayout: 'side-by-side' | 'inline';
@@ -225,6 +244,7 @@ export function StaticDiffPanel({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments?: CommentMarker[];
+  onSymbol?: (selection: SymbolPick) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const suppressScroll = useRef(false);
@@ -268,6 +288,23 @@ export function StaticDiffPanel({
         data-side={side}
         data-line={line.number}
         onClick={() => onLine(side, line.number)}
+        onMouseUp={() => {
+          const selection = window.getSelection();
+          if (!onSymbol || !selection || selection.isCollapsed || !selection.anchorNode || selection.anchorNode !== selection.focusNode ||
+              selection.anchorNode.nodeType !== Node.TEXT_NODE) return;
+          const code = selection.anchorNode.parentElement;
+          if (!code || code.tagName !== 'CODE') return;
+          const start = Math.min(selection.anchorOffset, selection.focusOffset);
+          const end = Math.max(selection.anchorOffset, selection.focusOffset);
+          const name = (line.text.replace(/\r$/, '')).slice(start, end);
+          if (!/^[$_\p{ID_Start}][$_\p{ID_Continue}]*$/u.test(name)) return;
+          const preceding = line.text[start - 1];
+          const following = line.text[end];
+          if (preceding && /^[$_\p{ID_Continue}]$/u.test(preceding) ||
+              following && /^[$_\p{ID_Continue}]$/u.test(following)) return;
+          onSymbol({ path: side === 'before' ? file.oldPath : file.path, side, line: line.number,
+            startColumn: start + 1, endColumn: end + 1, name });
+        }}
       >
         <span>{line.number}</span><code>{line.text.replace(/\r$/, '') || ' '}</code>
         {markers.length > 0 && <span className={`static-comment-marker${markers.every((item) => item.resolved) ? ' resolved' : ''}`} title={`${markers.length} 条评论`}>●{markers.length}</span>}

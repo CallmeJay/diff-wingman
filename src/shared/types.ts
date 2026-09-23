@@ -126,6 +126,72 @@ export interface HunkReviewState extends FileReviewState {
   inheritedFrom?: string;
 }
 
+export interface HunkEvidence {
+  text: string;
+  basis: 'source' | 'requirement' | 'mr' | 'inference' | 'pending';
+  refIds: string[];
+  requirementId?: string;
+  mrExcerpt?: string;
+}
+
+export interface HunkExplanation {
+  changeId: string;
+  what: HunkEvidence;
+  before: HunkEvidence;
+  after: HunkEvidence;
+  impacts: HunkEvidence[];
+  failures: HunkEvidence[];
+  tests: HunkEvidence[];
+  pending: HunkEvidence[];
+  guideFingerprint: string;
+  fingerprint: string;
+  createdAt: string;
+}
+
+export interface HunkUnderstandingState {
+  status: 'understood' | 'question' | 'verified';
+  evidence: string;
+  guideFingerprint: string;
+  explanationFingerprint: string;
+  updatedAt: string;
+}
+
+export interface SymbolLocation {
+  side: Side;
+  path: string;
+  blobOid: string;
+  line: number;
+  column: number;
+  endColumn: number;
+}
+
+export interface SymbolRelation {
+  id: string;
+  kind: 'definition' | 'incoming_call' | 'outgoing_call' | 'read' | 'write' | 'argument' | 'return' | 'reference' | 'test';
+  confidence: 'exact' | 'static_candidate' | 'text_candidate';
+  from: string;
+  to: string;
+  label: string;
+  change: 'added' | 'removed' | 'unchanged';
+  locations: SymbolLocation[];
+}
+
+export interface SymbolNode {
+  id: string;
+  name: string;
+  kind: string;
+  locations: SymbolLocation[];
+}
+
+export interface SymbolImpact {
+  snapshotId: string;
+  selected: { name: string; kind: string; type: string; locations: SymbolLocation[] };
+  nodes: SymbolNode[];
+  relations: SymbolRelation[];
+  indexedFiles: number;
+  limitations: string[];
+}
+
 export interface IncrementalHunk {
   changeId: string;
   status: 'new' | 'unchanged' | 'ambiguous';
@@ -193,6 +259,8 @@ export interface SavedReview {
   localComments?: LocalComment[];
   fileStates?: Record<string, FileReviewState>;
   hunkStates?: Record<string, HunkReviewState>;
+  hunkExplanations?: Record<string, HunkExplanation>;
+  hunkUnderstandingStates?: Record<string, HunkUnderstandingState>;
   incremental?: IncrementalComparison;
   readingPosition?: ReadingPosition;
   guide: Guide | null;
@@ -223,6 +291,7 @@ export interface GitLabMergeRequest {
   projectPath: string;
   iid: number;
   title: string;
+  description?: string;
   versionId: number;
   baseSha: string;
   headSha: string;
@@ -321,7 +390,7 @@ export interface CodexStatus {
 export interface TaskStatus {
   id: string;
   reviewId: string;
-  kind: 'guide' | 'question';
+  kind: 'guide' | 'question' | 'hunk';
   state: 'running' | 'completed' | 'failed' | 'cancelled';
   progress: string[];
   error: string | null;

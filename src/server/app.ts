@@ -1,7 +1,7 @@
 import express from 'express';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import type { Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
+import type { HunkExplanation, Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
 import { listClaims } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { compareMrVersions, hunkFingerprint, inheritMrReview } from '../shared/incremental.js';
@@ -12,6 +12,10 @@ import {
   commentDraftInputSchema,
   fileStateInputSchema,
   hunkStateInputSchema,
+  hunkUnderstandingInputSchema,
+  guideGenerationInputSchema,
+  hunkGenerationInputSchema,
+  hunkExplanationBatchSchema,
   gitlabImportInputSchema,
   guideSchema,
   localCommentInputSchema,
@@ -21,12 +25,16 @@ import {
   readingPositionInputSchema,
   reviewStateInputSchema,
   snapshotInputSchema,
+  symbolImpactInputSchema,
+  symbolSourceInputSchema,
   verificationInputSchema,
 } from '../shared/schemas.js';
 import { AppError, errorMessage } from './errors.js';
 import { createLiveSnapshot, createSnapshot, git, listRepositoryVersions, listUntracked } from './git.js';
 import { pickRepository } from './folder-picker.js';
-import { buildPrompt, mergeGuideBatches, planGuideBatches, validateAnswer, validateGuide } from './guide.js';
+import { buildPrompt, guideFingerprint, mergeGuideBatches, planGuideBatches, validateAnswer, validateGuide } from './guide.js';
+import { buildHunkPrompt, planHunkBatches, validateHunkExplanations } from './hunk-explanations.js';
+import { buildSymbolImpact, readImpactSource } from './symbol-impact.js';
 import { CodexProvider, getCodexStatus, type GuideProvider } from './codex.js';
 import { ReviewStore } from './store.js';
 import { formatCommentDrafts, formatReviewReport } from './report.js';
@@ -161,6 +169,14 @@ export function createApp(options: {
   });
   app.get('/api/reviews', async (_req, res) => res.json(await store.list()));
   app.get('/api/reviews/:id', async (req, res) => res.json(await store.get(id(req.params.id))));
+  app.post('/api/reviews/:id/symbol-impact', async (req, res) => {
+    const review = await store.get(id(req.params.id));
+    res.json(await buildSymbolImpact(review, symbolImpactInputSchema.parse(req.body)));
+  });
+  app.post('/api/reviews/:id/symbol-source', async (req, res) => {
+    const review = await store.get(id(req.params.id));
+    res.json(await readImpactSource(review, symbolSourceInputSchema.parse(req.body)));
+  });
   app.post('/api/untracked', async (req, res) => {
     const { repo } = z
       .object({ repo: z.string().min(1).max(4096) })
@@ -235,7 +251,8 @@ export function createApp(options: {
           JSON.stringify(review.gitlab.files) !== JSON.stringify(binding.files))
       )
         throw new AppError(409, 'GitLab 在同一 diff 版本返回了不同内容，旧草稿保留待重核。');
-      review.gitlab = binding;
+      // 同一固定 MR 版本沿用首次保存的描述，避免后续编辑使已生成卡片的引用变义。
+      review.gitlab = { ...binding, description: review.gitlab?.description ?? binding.description };
       review.commentDrafts ??= [];
       if (comparison && previous) {
         if (review.incremental && review.incremental.previousReviewId !== previous.snapshot.id)
@@ -599,6 +616,30 @@ export function createApp(options: {
     res.json(await store.get(reviewId));
   });
 
+  app.put('/api/reviews/:id/hunk-understanding', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = hunkUnderstandingInputSchema.parse(req.body);
+    if (input.status === 'verified' && !/\S/.test(input.evidence))
+      throw new AppError(400, '标记已核实前，请填写人工核实依据。');
+    if (!(await isFresh(reviewId)))
+      throw new AppError(409, '源码版本已变化，请重新导入后核对逐块结论。');
+    await store.update(reviewId, (review) => {
+      const card = review.hunkExplanations?.[input.changeId];
+      if (!card || card.guideFingerprint !== review.guideFingerprint ||
+          card.guideFingerprint !== input.guideFingerprint || card.fingerprint !== input.explanationFingerprint)
+        throw new AppError(409, '逐块解释已变化，请刷新后重新核对。');
+      review.hunkUnderstandingStates ??= {};
+      if (input.status === 'unread') delete review.hunkUnderstandingStates[input.changeId];
+      else review.hunkUnderstandingStates[input.changeId] = {
+        status: input.status, evidence: input.evidence,
+        guideFingerprint: input.guideFingerprint,
+        explanationFingerprint: input.explanationFingerprint,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    res.json(await store.get(reviewId));
+  });
+
   app.put('/api/reviews/:id/reading-position', async (req, res) => {
     const reviewId = id(req.params.id);
     const input = readingPositionInputSchema.parse(req.body);
@@ -693,22 +734,25 @@ export function createApp(options: {
   async function startTask(
     reviewId: string,
     question?: z.infer<typeof questionInputSchema>,
+    hunkId?: string,
+    includeHunks = false,
   ): Promise<TaskStatus> {
     const review = await store.get(reviewId);
     const group = question ? review.guide?.groups[question.groupIndex] : undefined;
     if (question && !group) throw new AppError(400, '请先选择已有的导读分组。');
+    if (hunkId && !review.guideFingerprint) throw new AppError(400, '请先生成阅读路线。');
     if (!review.snapshot.files.length) throw new AppError(400, '这两个版本之间没有变更。');
     const prompt = question && group
       ? buildPrompt(review.snapshot, { question: question.question, group })
-      : undefined;
-    const batches = question ? undefined : planGuideBatches(review.snapshot);
+      : hunkId ? buildHunkPrompt(review, [hunkId]) : undefined;
+    const batches = question || hunkId ? undefined : planGuideBatches(review.snapshot);
     if ([...tasks.values()].some((task) => task.active))
       throw new AppError(409, '已有导读任务正在执行或退出，请稍后重试。');
     // 首版单任务执行，避免重复点击和多标签页重复消耗订阅额度。
     const task: Task = {
       id: randomUUID(),
       reviewId,
-      kind: question ? 'question' : 'guide',
+      kind: question ? 'question' : hunkId ? 'hunk' : 'guide',
       state: 'running',
       progress: ['正在检查 Codex 登录…'],
       error: null,
@@ -745,6 +789,18 @@ export function createApp(options: {
               createdAt: new Date().toISOString(),
             });
           });
+        } else if (hunkId) {
+          const raw = await provider.generate({ prompt: prompt!, schema: hunkExplanationBatchSchema,
+            signal: task.controller.signal, onProgress });
+          if (task.controller.signal.aborted) return;
+          const [card] = validateHunkExplanations(raw, review, [hunkId]);
+          task.persisting = true;
+          await store.update(reviewId, (latest) => {
+            if (latest.guideFingerprint !== review.guideFingerprint)
+              throw new AppError(409, '导读已变化，逐块解释未保存。');
+            latest.hunkExplanations ??= {};
+            latest.hunkExplanations[hunkId] = card;
+          });
         } else {
           const guides = [];
           for (const [index, batch] of batches!.entries()) {
@@ -762,9 +818,23 @@ export function createApp(options: {
           const guide = batches!.length === 1
             ? guides[0]
             : validateGuide(mergeGuideBatches(guides), review.snapshot);
+          const cards: HunkExplanation[] = [];
+          if (includeHunks) {
+            const nextReview = { ...review, guide, guideFingerprint: guideFingerprint(guide) };
+            const planned = planHunkBatches(nextReview);
+            for (const [index, batch] of planned.entries()) {
+              if (task.controller.signal.aborted) return;
+              onProgress(`正在生成第 ${index + 1}/${planned.length} 批逐块解释…`);
+              const raw = await provider.generate({ prompt: batch.prompt, schema: hunkExplanationBatchSchema,
+                signal: task.controller.signal, onProgress });
+              if (task.controller.signal.aborted) return;
+              cards.push(...validateHunkExplanations(raw, nextReview, batch.changeIds));
+            }
+          }
           task.persisting = true;
           await store.update(reviewId, (latest) => {
             latest.guide = guide;
+            if (includeHunks) latest.hunkExplanations = Object.fromEntries(cards.map((card) => [card.changeId, card]));
           });
         }
         task.state = 'completed';
@@ -785,12 +855,17 @@ export function createApp(options: {
     return publicTask(task);
   }
 
-  app.post('/api/reviews/:id/guide', async (req, res) =>
-    res.status(202).json(await startTask(id(req.params.id))),
-  );
+  app.post('/api/reviews/:id/guide', async (req, res) => {
+    const input = guideGenerationInputSchema.parse(req.body ?? {});
+    res.status(202).json(await startTask(id(req.params.id), undefined, undefined, input.hunkMode === 'all'));
+  });
   app.post('/api/reviews/:id/questions', async (req, res) =>
     res.status(202).json(await startTask(id(req.params.id), questionInputSchema.parse(req.body))),
   );
+  app.post('/api/reviews/:id/hunk-explanations', async (req, res) => {
+    const input = hunkGenerationInputSchema.parse(req.body);
+    res.status(202).json(await startTask(id(req.params.id), undefined, input.changeId));
+  });
   app.get('/api/tasks', (_req, res) =>
     res.json([...tasks.values()].filter((task) => task.state === 'running').map(publicTask)),
   );

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.0.7-3f684c" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.0.8-3f684c" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-3f684c" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-%3E%3D20.19-3f684c" />
   <img alt="Electron" src="https://img.shields.io/badge/Electron-44-3f684c" />
@@ -27,8 +27,9 @@ Diff Wingman 是一个本地代码审查工具，适合在 AI 参与开发后梳
 | 版本选择 | 从分支、远端分支、Tag 和 HEAD 中选择，支持搜索或手动输入 commit |
 | 文件浏览 | 列表/树形视图、文件展开/折叠、路径搜索和多条件筛选 |
 | Diff 阅读 | 并排/内联布局、变更块上下文折叠与展开、逐块导航、单文件阅读模式 |
-| AI 导读 | 使用 Codex 生成阅读路线、需求对照和流程步骤；大 diff 自动分批分析并合并 |
-| 影响上下文 | 为 JS、TS、JSX 变更补充函数范围、定义和静态引用 |
+| AI 导读 | 使用 Codex 生成阅读路线、需求对照和流程步骤；生成前可选择整份逐块解释或逐块按需生成 |
+| 逐块理解 | 每个 hunk 的结构化解释卡、证据来源、覆盖矩阵和独立人工理解状态；“已核实”需填写依据 |
+| 影响上下文 | 为 JS、TS、JSX、TSX 变更补充函数范围、静态引用和固定提交树中的符号影响链 |
 | 人工审查 | 文件与变更块审查状态、本地评论、笔记、逐条判断、核实依据和 Markdown 审查报告 |
 | 隔离验证 | 在无网络、只读源码的 Docker 容器中运行选定的项目脚本 |
 | GitLab MR | 只读导入固定 MR 版本；手动选旧版增量复审，精确继承人工状态与评论位置 |
@@ -77,9 +78,11 @@ pnpm desktop:make
 
 1. 选择本地 Git 仓库，指定两个版本，或选择暂存区、工作区、GitLab MR。
 2. 填写本次需求和不得改变项，创建固定源码快照。
-3. 浏览文件 diff；需要时生成 AI 阅读路线或查看符号引用。
-4. 记录逐条判断、核实依据和验证结果。
+3. 浏览文件 diff；生成前选择整份或按需逐块解释，选中完整标识符时可查看符号影响链。
+4. 在覆盖矩阵中检查未分析块，记录独立理解状态、逐条判断、核实依据和验证结果。
 5. 导出 Markdown 审查报告。
+
+选择“逐块按需”时，阅读路线先生成；只有点击“生成此块解释”才调用 Codex。浏览和切换变更块不会自动生成解释。
 
 所有笔记和人工状态都绑定到对应快照。MR 更新后可手动选择上次审查的快照；只有内容完全一致且能唯一对应的文件、变更块和评论位置才会继承，其余明确待复审或待重新定位。文件状态由 reviewer 手动设置，打开或滚动文件不会自动标记完成。
 
@@ -115,7 +118,7 @@ export REVIEW_HELPER_GITLAB_TOKEN=your_read_only_token
 - 静态引用和 AI 解释都是审查线索，不代表运行时一定可达，最终结论由 reviewer 确认。
 - 源码快照、导读、笔记和报告保存在本机；默认目录不会提交到 Git。
 
-完整限制见[v0.0.7 范围与契约](docs/v7-scope.md)与[验收记录](docs/v7-verification.md)。
+完整限制见[v0.0.8 范围与契约](docs/v8-scope.md)与[验收记录](docs/v8-verification.md)。
 
 ## 配置
 
@@ -140,6 +143,9 @@ pnpm check:v2
 pnpm check:v3
 pnpm check:v4
 pnpm check:v5
+pnpm check:v6
+pnpm check:v7
+pnpm check:v8
 ```
 
 Docker Desktop 正在运行且本机已有验证镜像时，可以执行真实容器验收：
@@ -168,6 +174,8 @@ docs/          版本范围、验收记录和开发计划
 - [第四版范围](docs/v4-scope.md) / [验收记录](docs/v4-verification.md)
 - [第五版范围](docs/v5-scope.md) / [验收记录](docs/v5-verification.md)
 - [第六版范围](docs/v6-scope.md) / [验收记录](docs/v6-verification.md)
+- [第七版范围](docs/v7-scope.md) / [验收记录](docs/v7-verification.md)
+- [第八版范围](docs/v8-scope.md) / [验收记录](docs/v8-verification.md)
 
 ## 开源许可
 

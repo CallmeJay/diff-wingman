@@ -12,6 +12,7 @@ const versionSchema = z.object({
 });
 const mrSchema = z.object({
   title: z.string(),
+  description: z.string().nullable().optional(),
   diff_refs: z.object({ base_sha: sha, head_sha: sha, start_sha: sha }).nullable().optional(),
 });
 const diffSchema = z.object({
@@ -286,6 +287,7 @@ export class GitLabClient implements GitLabReader {
       projectPath: link.projectPath,
       iid: link.iid,
       title: mr.title,
+      description: mr.description ?? '',
       versionId: version.id,
       baseSha: version.base_commit_sha,
       headSha: version.head_commit_sha,

@@ -16,8 +16,34 @@ export interface StaticReference {
   changeIds: string[];
 }
 
-const virtualRoot = '/__review_snapshot__';
-const virtualPath = (filePath: string) => path.posix.join(virtualRoot, filePath);
+export const virtualRoot = '/__review_snapshot__';
+export const virtualPath = (filePath: string) => path.posix.join(virtualRoot, filePath);
+
+// 两处静态分析共用同一份固定文本索引与模块解析设置，避免引用结果出现配置差异。
+export function createSnapshotLanguageService(sources: Map<string, string>): ts.LanguageService {
+  const files = new Map([...sources].map(([filePath, text]) => [virtualPath(filePath), text]));
+  const host: ts.LanguageServiceHost = {
+    getCompilationSettings: () => ({
+      allowJs: true, checkJs: false, target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Node10,
+      jsx: ts.JsxEmit.Preserve, noLib: true,
+    }),
+    getScriptFileNames: () => [...files.keys()],
+    getScriptVersion: () => '1',
+    getScriptSnapshot: (fileName) => {
+      const text = files.get(fileName);
+      return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
+    },
+    getCurrentDirectory: () => virtualRoot,
+    getDefaultLibFileName: () => `${virtualRoot}/lib.d.ts`,
+    fileExists: (fileName) => files.has(fileName),
+    readFile: (fileName) => files.get(fileName),
+    directoryExists: (directory) => directory === virtualRoot ||
+      [...files.keys()].some((file) => file.startsWith(`${directory}/`)),
+    readDirectory: () => [],
+  };
+  return ts.createLanguageService(host);
+}
 
 function isImportPosition(source: ts.SourceFile, position: number): boolean {
   let nested: ts.Node = source;
@@ -41,33 +67,7 @@ export function findStaticReferences(
   declarations: ChangedSymbol[],
   limit = 30,
 ): StaticReference[] {
-  const files = new Map([...sources].map(([filePath, text]) => [virtualPath(filePath), text]));
-  const host: ts.LanguageServiceHost = {
-    getCompilationSettings: () => ({
-      allowJs: true,
-      checkJs: false,
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Node10,
-      jsx: ts.JsxEmit.Preserve,
-      noLib: true,
-    }),
-    getScriptFileNames: () => [...files.keys()],
-    getScriptVersion: () => '1',
-    getScriptSnapshot: (fileName) => {
-      const text = files.get(fileName);
-      return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
-    },
-    getCurrentDirectory: () => virtualRoot,
-    getDefaultLibFileName: () => `${virtualRoot}/lib.d.ts`,
-    fileExists: (fileName) => files.has(fileName),
-    readFile: (fileName) => files.get(fileName),
-    directoryExists: (directory) =>
-      directory === virtualRoot ||
-      [...files.keys()].some((file) => file.startsWith(`${directory}/`)),
-    readDirectory: () => [],
-  };
-  const service = ts.createLanguageService(host);
+  const service = createSnapshotLanguageService(sources);
   const found = new Map<string, StaticReference>();
   try {
     const program = service.getProgram();
