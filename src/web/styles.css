@@ -874,6 +874,7 @@ textarea {
 .file-filter-flags label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
 .file-filter-flags input { margin: 0; }
 .file-review-counts { color: #637365; line-height: 1.5; }
+.file-count-note { margin: 4px 0 0; color: #879782; font-size: 9px; line-height: 1.5; }
 .next-unreviewed {
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -1520,6 +1521,7 @@ textarea {
   margin-top: 10px;
   width: 100%;
 }
+.generate-block > .report-scope { margin-top: 6px; color: #71816d; }
 .report-preview {
   margin-top: 10px;
   color: #728568;
@@ -1583,6 +1585,7 @@ textarea {
 .feature-overview .feature-list { max-height: 280px; overflow: auto; margin-top: 12px; padding-right: 4px; }
 .feature-overview .group-item > div { min-width: 0; overflow-wrap: anywhere; }
 .feature-overview-counts { margin-top: 10px; color: #4f7057; font-size: 10px; }
+.feature-count-note { margin-top: 5px; color: #71816d; font-size: 10px; line-height: 1.5; }
 .commit-context { margin-top: 12px; color: #728071; font-size: 10px; }
 .commit-context summary { cursor: pointer; }
 .commit-context p { margin: 6px 0; overflow-wrap: anywhere; }
@@ -1939,12 +1942,29 @@ textarea {
 .v8-panel { margin-top: 19px; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .v8-panel h3 { font-size: 12px; color: #36553b; margin-bottom: 10px; }
 .v8-panel h3 small { font-size: 10px; color: var(--muted); font-weight: 400; }
-.v8-matrix summary { cursor: pointer; color: #496b47; font-size: 11px; }
-.v8-matrix-table { overflow-x: auto; margin-top: 9px; max-height: 240px; overflow-y: auto; border: 1px solid var(--line); border-radius: 5px; }
-.v8-matrix-table [role="row"] { display: grid; grid-template-columns: 170px 90px 65px 70px 55px 40px; min-width: 490px; align-items: center; gap: 5px; padding: 7px; border: 0; border-bottom: 1px solid var(--line); width: 100%; text-align: left; font-size: 10px; background: #fff; }
+.v8-progress-note { margin: 0 0 9px; color: #71816d; font-size: 10px; line-height: 1.5; }
+.v8-matrix-trigger { border: 0; padding: 0; background: none; cursor: pointer; color: #496b47; font-size: 11px; text-align: left; }
+.v8-matrix-dialog { width: min(1020px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border: 1px solid #cbd8c8; border-radius: 8px; background: #fdfefb; box-shadow: 0 16px 50px #14251f35; color: #394c3c; }
+.v8-matrix-dialog::backdrop { background: #14251f70; }
+.v8-matrix-dialog-heading { display: flex; align-items: start; justify-content: space-between; gap: 18px; padding: 17px 20px; }
+.v8-matrix-dialog-heading h3 { margin: 0 0 6px; font-size: 15px; }
+.v8-matrix-dialog-heading p { color: #71816d; font-size: 10px; line-height: 1.6; }
+.v8-matrix-actions { display: flex; flex: none; gap: 7px; }
+.v8-matrix-actions button { border: 1px solid var(--line); border-radius: 5px; background: #fff; padding: 6px 9px; color: #496b47; font-size: 10px; white-space: nowrap; }
+.v8-matrix-table { overflow: auto; max-height: min(72vh, 720px); margin: 0 18px 14px; border: 1px solid var(--line); border-radius: 5px; }
+.v8-matrix-table [role="row"] { display: grid; grid-template-columns: minmax(210px, 2fr) minmax(85px, .8fr) minmax(95px, .8fr) minmax(110px, .9fr) minmax(85px, .7fr) 50px; align-items: center; gap: 8px; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line); width: 100%; text-align: left; font-size: 11px; background: #fff; }
 .v8-matrix-table button[role="row"]:hover, .v8-matrix-table button.selected { background: #eef5eb; }
 .v8-matrix-table span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v8-matrix-heading { color: #65765b; font-weight: 600; position: sticky; top: 0; z-index: 1; }
+.v8-matrix-dialog > p { margin: 0 20px 16px; }
+@media (max-width: 780px) {
+  .v8-matrix-dialog-heading { flex-wrap: wrap; padding: 14px; }
+  .v8-matrix-table { margin: 0 12px 12px; }
+  .v8-matrix-table .v8-matrix-heading { display: none; }
+  .v8-matrix-table button[role="row"] { display: grid; grid-template-columns: 1fr; gap: 4px; }
+  .v8-matrix-table button[role="row"] span { white-space: normal; overflow-wrap: anywhere; }
+  .v8-matrix-table button[role="row"] span::before { content: attr(data-label) '：'; color: #71816d; font-weight: 600; }
+}
 .v8-unanalysed { display: grid; gap: 5px; margin-top: 12px; padding: 9px; background: #fbf7eb; border-radius: 5px; }
 .v8-unanalysed strong { color: #8d6e35; font-size: 10px; }
 .v8-unanalysed button { text-align: left; border: 0; background: transparent; color: #7a6035; font-size: 10px; padding: 2px 0; overflow-wrap: anywhere; }

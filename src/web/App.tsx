@@ -807,6 +807,7 @@ export function App() {
   const fileSearchRef = useRef<HTMLInputElement>(null);
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(() => new Set());
   const allFilesScroll = useRef<HTMLDivElement>(null);
+  const codeSectionRef = useRef<HTMLElement>(null);
   const [creating, setCreating] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [task, setTask] = useState<TaskStatus | null>(null);
@@ -1706,6 +1707,14 @@ export function App() {
     else if (change.oldLines > 0) jumpTo(sourceFile, 'before', change.oldStart);
     else chooseFile(sourceFile.id);
   }
+  function focusCodeAfterMatrix() {
+    // 窄窗口中 AI 面板在代码下方，关闭矩阵后需要把当前 hunk 重新带回视口。
+    if (!window.matchMedia('(max-width: 1020px)').matches) return;
+    requestAnimationFrame(() => {
+      codeSectionRef.current?.focus({ preventScroll: true });
+      codeSectionRef.current?.scrollIntoView({ block: 'start' });
+    });
+  }
   function firstPosition(sourceFile: ReviewFile): { side: Side; line: number } | null {
     const first = sourceFile.changes.find((item) => item.id.includes(':hunk-'));
     if (first && first.newLines > 0) return { side: 'after', line: first.newStart };
@@ -1980,7 +1989,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.10</span>
+          <span className="version-tag">v0.0.11</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -2833,6 +2842,7 @@ export function App() {
                         <label><input type="checkbox" checked={filters.unavailable} onChange={(event) => setFilters((value) => ({ ...value, unavailable: event.target.checked }))} />无法分析</label>
                       </div>
                       <div className="file-review-counts">{freshness === null && (review.gitlab || snapshot.mode && snapshot.mode !== 'commits') ? '源码状态校验中…' : `已审查 ${statusCounts.reviewed} · 有疑问 ${statusCounts.question} · 未审查 ${statusCounts.unreviewed}`}</div>
+                      <p className="file-count-note">按文件统计；hunk 审查、逐块理解和逐条判断分别记录。</p>
                       <button type="button" className="next-unreviewed" onClick={nextUnreviewedFile} disabled={!visibleFiles.some((item) => ['unread', 'in_progress'].includes(currentFileStatus(review, item, fileStatesFresh)))}>下一个未审查文件</button>
                     </div>}
                     <div className={`nav-content${navigation === 'files' && fileView === 'tree' ? ' tree-mode' : ''}${navigation === 'guide' ? ' guide-mode' : ''}`}>
@@ -2881,7 +2891,7 @@ export function App() {
                       显示 {visibleFiles.length}/{snapshot.files.length} 个文件 · {changes.length} 处变更
                     </div>
                   </nav>
-                  <section className="code-section">
+                  <section className="code-section" ref={codeSectionRef} tabIndex={-1}>
                     <div className="code-heading">
                       <Icon name="file" size={16} />
                       <span title={file?.path ?? activeRef?.path}>
@@ -3047,12 +3057,15 @@ export function App() {
                             : status?.message ?? '正在检查 Codex 登录…'}
                         </p>
                         {review.guide && (
-                          <button
-                            className="secondary-button report-button"
-                            onClick={() => void exportReport()}
-                          >
-                            导出审查报告（Markdown）
-                          </button>
+                          <>
+                            <button
+                              className="secondary-button report-button"
+                              onClick={() => void exportReport()}
+                            >
+                              导出当前审查记录（Markdown）
+                            </button>
+                            <p className="report-scope">报告会列出未核实判断和未分析变更（如有）；文件审查、hunk 审查及逐块理解状态仍在页面单独查看。审查未完成时也可导出，导出不代表通过。</p>
+                          </>
                         )}
                         {reportPreview?.reviewId === snapshot.id && (
                           <details className="report-preview" open>
@@ -3073,6 +3086,7 @@ export function App() {
                           {review.guide.groups.length} 个{review.commitContext ? '功能或变更主题' : '阅读分组'} · 已归类 {review.guide.groups.reduce((count, item) => count + item.changeIds.length, 0)}/{changes.length} 处变更
                           {' · '}待人工核对 {review.guide.unreviewed.length} 处
                         </div>
+                        <p className="feature-count-note">已归类只表示进入阅读分组，不等于逐块解释或人工核实；功能标签是独立的分组状态。</p>
                         <FeatureList review={review} selectedGroup={selectedGroup} statusLabel={groupStatusLabel}
                           onGroup={(index) => { setNavigation('guide'); chooseGroup(index); }}
                           onChange={chooseFeatureChange}
@@ -3088,9 +3102,14 @@ export function App() {
                         onChange={(changeId) => {
                           const selected = snapshot.files.find((item) => item.changes.some((change) => change.id === changeId));
                           const change = selected?.changes.find((item) => item.id === changeId);
-                          if (selected && change) jumpTo(selected, change.newLines ? 'after' : 'before',
-                            change.newLines ? change.newStart : change.oldStart);
+                          if (selected && change) {
+                            // 矩阵跳转同步既有功能高亮；未分析项不应继续显示上一功能的范围。
+                            setSelectedGroup(review.guide?.groups.findIndex((item) => item.changeIds.includes(changeId)) ?? -1);
+                            jumpToChange(selected, change);
+                            focusCodeAfterMatrix();
+                          }
                         }}
+                        onMatrixClose={focusCodeAfterMatrix}
                         onSource={showRef} />}
                       {review.guide ? (
                         <>
