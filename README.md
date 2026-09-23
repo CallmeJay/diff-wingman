@@ -1,89 +1,135 @@
-# Diff Wingman
+<p align="center">
+  <img src="assets/app-icon.png" width="112" alt="Diff Wingman icon" />
+</p>
 
-本地源码导读工作台。比较 Git 提交、暂存区或当前工作区，将真实 diff、需求原文、Codex 导读和人工审查记录放在同一个界面中。
+<h1 align="center">Diff Wingman</h1>
 
-后续版本方向见 [开发路线图](docs/roadmap.md)。路线图中的功能均为规划，只有写入对应版本范围与验收记录后才视为已经实现。
+<p align="center">
+  在本地把代码差异、AI 导读和人工审查证据放到同一个工作区。
+</p>
 
-## 启动
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.0.5-3f684c" />
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-3f684c" />
+  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-%3E%3D20.19-3f684c" />
+  <img alt="Electron" src="https://img.shields.io/badge/Electron-44-3f684c" />
+</p>
 
-需要 Node.js 20.19+、pnpm、Git。macOS 系统文件夹弹窗使用系统自带的 `osascript` 和 AppKit。AI 功能还需要官方 Codex CLI（本项目验证版本为 0.144.1）及 ChatGPT 登录。
+Diff Wingman 是一个本地代码审查工具，适合在 AI 参与开发后梳理真实改动。它从 Git 读取固定快照，在 diff 旁展示需求、调用上下文、Codex 导读、人工判断和验证结果，帮助审查者弄清楚代码改了什么、为什么改、影响可能在哪里。
+
+> 当前版本是早期预览版，主要面向个人本地审查。它不会替代人工判断，也不会自动批准、修改或合并代码。
+
+## 功能
+
+| 能力 | 当前实现 |
+| --- | --- |
+| Git diff | 比较两个提交，也可审查暂存区、工作区和明确选中的未跟踪文件 |
+| 版本选择 | 从分支、远端分支、Tag 和 HEAD 中选择，支持搜索或手动输入 commit |
+| 文件浏览 | 列表/树形视图、文件展开/折叠 |
+| Diff 阅读 | 并排/内联布局、空白变更开关、单文件阅读模式 |
+| AI 导读 | 使用 Codex 生成阅读路线、需求对照和流程步骤；大 diff 自动分批分析并合并 |
+| 影响上下文 | 为 JS、TS、JSX 变更补充函数范围、定义和静态引用 |
+| 人工审查 | 保存笔记、逐条判断、核实依据和 Markdown 审查报告 |
+| 隔离验证 | 在无网络、只读源码的 Docker 容器中运行选定的项目脚本 |
+| GitLab MR | 只读导入 MR，在 diff 行上保存本地评论草稿并检查版本是否过期 |
+
+## 快速开始
+
+### 环境要求
+
+- Node.js 20.19 或更高版本
+- pnpm 10
+- Git
+- [Codex CLI](https://developers.openai.com/codex)（使用 AI 导读时需要）
+- Docker（运行隔离验证时需要）
+
+### 浏览器版本
 
 ```bash
+git clone https://github.com/CallmeJay/diff-wingman.git
+cd diff-wingman
 pnpm install
 pnpm dev
 ```
 
-打开终端显示的本地地址，默认 http://127.0.0.1:4318。
+打开终端输出的地址，默认是 <http://127.0.0.1:4318>。
 
-生产构建：
+### macOS 桌面版本
 
-```bash
-pnpm build
-pnpm start
-```
-
-`REVIEW_HELPER_PORT` 可指定端口（1024–65535）；`REVIEW_HELPER_DATA_DIR` 可指定本地数据目录。默认数据在项目 `.review-helper/`，被 Git 忽略。
-
-### macOS 桌面应用
-
-桌面版复用同一套页面和本机接口，双击应用后会自行启动服务并打开窗口；“选择文件夹”直接使用 Electron 的系统目录弹窗。构建桌面版需要 Node.js 22.12+（22.x）、pnpm 和 Git：
+桌面构建需要 Node.js 22.12 或更高的 22.x 版本。
 
 ```bash
 pnpm install
-pnpm desktop:dev       # 从源码启动桌面窗口
-pnpm desktop:package   # 生成 out/ 中的 .app
-pnpm desktop:make      # 生成 out/make/ 中的 macOS ZIP
+pnpm desktop:dev
 ```
 
-从源码运行桌面版时，记录仍使用项目 `.review-helper/`；打包后默认写入 `~/Library/Application Support/Diff Wingman/reviews/`，不会随应用更新被覆盖。首次从旧版启动时，会复制 `~/Library/Application Support/Source Review Helper/reviews/` 中的已有记录并保留原目录。如需沿用网页版已有记录，退出应用后将原 `.review-helper/` 内的 JSON 文件复制到新目录，或启动前设置 `REVIEW_HELPER_DATA_DIR` 指向原目录。桌面版使用随机本机端口，不占用网页版的 4318 端口。Git、Codex CLI 与 Docker 仍需安装在本机；私有 GitLab MR 仍使用现有环境变量配置。当前生成的应用没有签名或公证，只用于本机验收。
-
-## 使用
-
-1. 在 macOS 点击“选择文件夹”打开系统目录弹窗，或手动输入本地 Git 仓库的绝对路径；再选择“两个提交版本”“HEAD → 暂存区”或“HEAD → 当前工作区”。两个提交版本可从本地分支、远端跟踪分支、标签和 HEAD 中选择，也可手动输入引用或 commit；列表只读本地已有版本，不自动 fetch。提交前模式需要仓库已有 `HEAD`。
-2. 工作区模式自动包含已跟踪文件的修改；点击“选择未跟踪文件”后，逐项勾选需要纳入的文件。
-3. 可填写“本次需求”和“不得改变项”，每行一项。点击“打开变更”固定此刻源码和需求；此时不调用模型。
-4. 查看文件 diff，或点击“生成阅读路线”，通过 Codex 生成业务分组、需求对照与有证据的流程步骤。
-5. 点击源码引用，围绕分组追问，并由人工保存笔记和审查状态；“已核实”需要填写核实依据。
-6. “最近快照”可重新打开记录。提交前源码变化会提示快照过期；从左侧重新建立当前快照后再核实。
-7. 第三版可对需求、修改前后、关键规则和流程中的每条判断单独记录“已确认、有疑问、不成立”及人工依据；点击“导出审查报告（Markdown）”保存需求、源码位置与人工记录。
-8. 打开第二版保存过的同一源码快照后，再点击“打开变更”，可补充第三版的静态引用；原有导读、笔记和人工状态仍保留。
-9. 第四版在两个 commit 的快照中列出待核对判断。选择目标 commit 中的检查脚本，填写触发条件和预期结果，再点击“运行选定检查”；退出码和日志会保存在本地报告中，人工状态不会自动改变。
-10. 第五版可将“来源”切换到“GitLab MR（只读）”，填写本地仓库与 MR 链接。导入成功后可在 diff 新增/删除行创建本地评论草稿，复制或导出；MR 版本变化后旧草稿标为待重核。
-
-首次使用 AI 前在终端执行 `codex login`，再以 `codex login status` 确认 ChatGPT 登录。工具不读取或复制 auth.json，当前版本仅允许 ChatGPT 登录；不会在订阅额度不足时自动切换 API Key。
-
-读取私有 GitLab MR 时，在启动工具前设置 `REVIEW_HELPER_GITLAB_TOKEN` 和 `REVIEW_HELPER_GITLAB_HOST`（只填域名，例如 `gitlab.example.com`）。请使用具备读取 MR 权限的令牌；第五版仅发 GET 请求，不会在 GitLab 上发布评论或修改 MR。导入所需 commit 必须已在本地仓库中，工具不会自动 fetch。完整边界见 [第五版范围与契约](docs/v5-scope.md)。
-
-## 当前边界
-
-- **版本**：手工提交比较仍使用两个 commit 的端点；GitLab MR 模式使用平台给出的 merge-base 和 head，并核对 diff 版本。提交前模式以当时的 `HEAD` 为基线；工作区包括已跟踪文件的暂存和未暂存修改，未跟踪文件仅纳入明确勾选的项。工具不会 checkout、修改 index 或写入被审查仓库。
-- **源码**：支持 UTF-8 文本；二进制、符号链接、子模块、超过 256 KB 的单个文件保留记录并明确标为未分析。快照文本最多 8 MB、300 个变更文件。
-- **上下文**：JS/TS/JSX 解析变更所在函数，补充每侧最多 10 个相关文件。对已载入的固定快照文本，TypeScript Language Service 最多检查每侧 6 个变更声明、30 处跨文件静态引用；超出 60 文件或 150 万字符时保留原有候选。未完整载入的模块、别名路径、动态调用与运行时注入仍待人工核对，静态引用不证明运行时可达。
-- **模型**：通过官方 `codex exec` 调用；以空临时目录为工作目录，关闭命令执行、插件、hooks、应用、浏览器等不需要的能力，使用只读沙箱。提示词与固定源码通过 stdin 传入。导读单批上下文最多 180,000 字符，超限时按文件顺序分批并合并校验；单批 8 分钟超时，同一时间仅执行一个任务，支持取消。
-- **数据**：本地读取不等于离线推理。点击生成/追问会将选定的源码上下文及输入的需求发往 Codex 服务，并消耗该账号权益。源码快照、导读、人工状态和笔记保存在本机，报告在本地生成；临时模型输入输出在调用结束后清理。
-- **解释**：校验结果结构、引用 ID、需求 ID 与每处变更的归属。需求对照和业务步骤仍是待人工核实的解释；静态符号引用也不证明运行时调用关系。第四版只在用户选择后运行检查脚本，不自动批准或修复。
-- **隔离验证**：需要运行中的 Docker 和本机已有的 `node:22-alpine` 镜像，或通过 `REVIEW_HELPER_VERIFY_IMAGE` 指定的本机镜像。只支持 commit 快照、根目录 `package.json` 中的检查脚本；不会拉取镜像、安装依赖或在宿主机回退执行。源码由 Git 对象还原到工具临时目录，容器无网络、源码只读，资源和输出受限。详细限制见 `docs/v4-scope.md`。
-- **持久化**：提交前快照按源码及需求内容固定身份；笔记和人工状态只属于对应快照。逐条判断绑定整份导读，导读或源码变化后旧记录在页面和报告中标为待重核。只面向个人本地使用，无公共服务器或多用户认证。
-- **MR 评论**：仅支持 GitLab MR 只读导入与本地草稿。链接必须匹配本地 Git 远端；平台 diff 与本地快照不一致、被折叠或超限时拒绝导入。MR 更新后旧草稿不会自动迁移；复制前再次检查版本。不会向平台写入评论、批准或合并。
-
-官方参考：[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)、[认证方式](https://developers.openai.com/codex/auth)。
-
-## 代码阅读路线
-
-1. `src/shared/types.ts`、`schemas.ts`：快照、证据与模型输出契约。
-2. `src/server/git.ts`：读取 Git 对象、提取变更和静态上下文。
-3. `src/server/guide.ts`：准备输入及校验引用、覆盖。
-4. `src/server/symbols.ts`：在固定快照的有限文本中查找 JS/TS 静态符号引用。
-5. `src/server/codex.ts`：官方 CLI 调用、订阅检查、取消和失败处理。
-6. `src/server/store.ts`、`report.ts`：本地记录与 Markdown 报告。
-7. `src/server/app.ts`：本机接口、任务生命周期与存储连接。
-8. `src/web/App.tsx`、`CodePanel.tsx`：导读、diff、引用跳转与笔记。
-9. `src/server/verification.ts`：第四版 commit 还原、脚本选择与隔离执行。
-10. `src/server/gitlab.ts`：第五版只读 MR 导入、diff 行定位与版本新鲜度检查。
-
-## 定向验证
+生成本机 `.app` 或 macOS ZIP：
 
 ```bash
+pnpm desktop:package
+pnpm desktop:make
+```
+
+当前应用尚未签名或公证，生成结果只适合本机使用。
+
+## 使用流程
+
+1. 选择本地 Git 仓库，指定两个版本，或选择暂存区、工作区、GitLab MR。
+2. 填写本次需求和不得改变项，创建固定源码快照。
+3. 浏览文件 diff；需要时生成 AI 阅读路线或查看符号引用。
+4. 记录逐条判断、核实依据和验证结果。
+5. 导出 Markdown 审查报告。
+
+所有笔记和人工状态都绑定到对应快照。源码或 MR 版本变化后，旧记录会标记为待重核。
+
+## Codex 配置
+
+Diff Wingman 通过官方 Codex CLI 调用模型。首次使用前登录 ChatGPT：
+
+```bash
+codex login
+codex login status
+```
+
+点击生成或追问时，选中的源码上下文和需求会发送到 Codex 服务并消耗账号额度。本地读取 Git 不会调用模型，工具也不会读取或复制 Codex 的 `auth.json`。
+
+## GitLab MR
+
+读取私有 GitLab MR 前设置：
+
+```bash
+export REVIEW_HELPER_GITLAB_HOST=gitlab.example.com
+export REVIEW_HELPER_GITLAB_TOKEN=your_read_only_token
+```
+
+令牌只用于读取 MR。Diff Wingman 不会向 GitLab 发布评论、批准或合并 MR；评论草稿保存在本机。MR 对应的提交必须已经存在于本地仓库，工具不会自动执行 `git fetch`。
+
+## 安全边界
+
+- Git 访问是只读的，不会 checkout、修改 index 或写入被审查仓库。
+- Codex 在只读沙箱中运行，关闭命令执行和不需要的外部能力。
+- Docker 验证关闭网络，挂载只读源码，并限制资源、运行时间和输出大小。
+- 静态引用和 AI 解释都是审查线索，不代表运行时一定可达，最终结论由 reviewer 确认。
+- 源码快照、导读、笔记和报告保存在本机；默认目录不会提交到 Git。
+
+完整限制见[第五版范围说明](docs/v5-scope.md)与[验收记录](docs/v5-verification.md)。
+
+## 配置
+
+| 环境变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| `REVIEW_HELPER_PORT` | 浏览器版本监听端口 | `4318` |
+| `REVIEW_HELPER_DATA_DIR` | 本地审查记录目录 | 项目内 `.review-helper/` |
+| `REVIEW_HELPER_GITLAB_HOST` | GitLab 域名 | 无 |
+| `REVIEW_HELPER_GITLAB_TOKEN` | GitLab 只读令牌 | 无 |
+| `REVIEW_HELPER_VERIFY_IMAGE` | Docker 验证镜像 | `node:22-alpine` |
+
+打包后的 macOS 应用默认把记录保存在 `~/Library/Application Support/Diff Wingman/reviews/`。
+
+## 开发
+
+```bash
+pnpm build
 pnpm check:git
 pnpm check:guide
 pnpm check:server
@@ -91,19 +137,34 @@ pnpm check:v2
 pnpm check:v3
 pnpm check:v4
 pnpm check:v5
-pnpm build
 ```
 
-Docker Desktop 运行且本机已有验证镜像时，可额外执行 `pnpm check:v4:docker`，用临时合成仓库检查真实容器的固定 commit、只读源码、无网络和证据落盘。
-
-HTTP 测试使用可控的模型适配器，验证真实快照、接口、持久化和任务生命周期；不证明真实 Codex 服务可用。真实 CLI 验证另行记录在 `docs/verification.md`。
-
-第五版的 GitLab 只读导入、草稿及过期路径使用合成 MR 验收，结果见 [第五版验收记录](docs/v5-verification.md)；真实私有 MR 仍需提供可读链接和授权后验证。
-
-生成用于手动验证的最小临时 Git 仓库：
+Docker Desktop 正在运行且本机已有验证镜像时，可以执行真实容器验收：
 
 ```bash
-pnpm exec tsx scripts/create-demo.ts
+pnpm check:v4:docker
 ```
 
-脚本输出路径与两个 commit。该仓库只包含合成示例，不涉及业务仓库。
+主要目录：
+
+```text
+src/web/       React 审查界面
+src/server/    Git、Codex、GitLab、报告和验证逻辑
+src/electron/  macOS 桌面入口
+src/shared/    数据类型与运行时契约
+tests/         Git、HTTP、符号分析和 Docker 验收
+docs/          版本范围、验收记录和开发计划
+```
+
+## 文档
+
+- [开发路线图](docs/roadmap.md)
+- [第一版范围](docs/scope.md) / [验收记录](docs/verification.md)
+- [第二版范围](docs/v2-scope.md) / [验收记录](docs/v2-verification.md)
+- [第三版范围](docs/v3-scope.md) / [验收记录](docs/v3-verification.md)
+- [第四版范围](docs/v4-scope.md) / [验收记录](docs/v4-verification.md)
+- [第五版范围](docs/v5-scope.md) / [验收记录](docs/v5-verification.md)
+
+## 开源许可
+
+仓库目前还没有添加开源许可证。在许可证确定前，代码可公开查看，但不代表已经授权复制、修改或分发。
