@@ -640,6 +640,52 @@ function FileTree({
   );
 }
 
+// 左侧导航和 AI 总览共用固定快照中的功能归属，避免两个入口显示不同的文件与 hunk。
+function FeatureList({ review, selectedGroup, statusLabel, onGroup, onChange, onUnreviewed }: {
+  review: SavedReview;
+  selectedGroup: number;
+  statusLabel: (index: number) => string;
+  onGroup: (index: number) => void;
+  onChange: (index: number, file: ReviewFile, change: Change) => void;
+  onUnreviewed: (file: ReviewFile, change: Change) => void;
+}) {
+  if (!review.guide) return null;
+  return <div className="feature-list">
+    {review.guide.groups.map((item, index) => {
+      const files = featureFiles(review.snapshot, item);
+      return <div className="feature-nav-entry" key={index}>
+        <button type="button" className={`group-item ${selectedGroup === index ? 'active' : ''}`}
+          aria-expanded={selectedGroup === index} onClick={() => onGroup(index)}>
+          <span>{String(index + 1).padStart(2, '0')}</span>
+          <div><strong>{item.title}</strong>
+            <small>{files.length} 个文件 · {item.changeIds.length} 处变更 · {statusLabel(index)}</small></div>
+        </button>
+        {selectedGroup === index && <div className="feature-file-list" aria-label={`${item.title}对应的文件改动`}>
+          {files.map(({ file, changes }) => <div className="feature-file" key={file.id}>
+            <button type="button" className="feature-file-name" title={file.path}
+              onClick={() => onChange(index, file, changes[0])}>
+              {file.path} <small>{changes.length} 处</small>
+            </button>
+            {changes.map((change) => <button type="button" className="feature-change" key={change.id}
+              onClick={() => onChange(index, file, change)}>{change.label}</button>)}
+          </div>)}
+        </div>}
+      </div>;
+    })}
+    {review.guide.unreviewed.length > 0 && <div className="unreviewed">
+      <strong>未分析／待核对 · {review.guide.unreviewed.length}</strong>
+      {review.guide.unreviewed.map((item) => {
+        const file = review.snapshot.files.find((row) => row.changes.some((change) => change.id === item.changeId));
+        const change = file?.changes.find((row) => row.id === item.changeId);
+        return <button type="button" className="unreviewed-change" key={item.changeId}
+          onClick={() => { if (file && change) onUnreviewed(file, change); }}>
+          {file?.path} · {change?.label}：{item.reason}
+        </button>;
+      })}
+    </div>}
+  </div>;
+}
+
 function FileDiffCard({
   file,
   base,
@@ -737,6 +783,7 @@ export function App() {
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [history, setHistory] = useState<ReviewSummary[]>([]);
   const [review, setReview] = useState<SavedReview | null>(null);
+  const [snapshotFormOpen, setSnapshotFormOpen] = useState(true);
   const reviewId = useRef<string | undefined>();
   reviewId.current = review?.snapshot.id;
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -1098,6 +1145,8 @@ export function App() {
     setSelectedUntracked(value.snapshot.untracked ?? []);
     setUntracked([]);
     setReview(value);
+    // 建档成功后把空间还给源码；再次展开只改变页面布局，不触碰固定快照和审查记录。
+    setSnapshotFormOpen(false);
     setHunkMode(null);
     setSymbolPick(null);
     setSymbolImpact(null);
@@ -1711,6 +1760,12 @@ export function App() {
     }
     setNoteFeedback('');
   }
+  function chooseFeatureChange(index: number, sourceFile: ReviewFile, change: Change) {
+    // 从 AI 总览跳转时沿用阅读路线的功能高亮，不改变文件审查或人工理解状态。
+    setNavigation('guide');
+    setSelectedGroup(index);
+    jumpToChange(sourceFile, change);
+  }
   function chooseLine(side: Side, line: number, sourceFile: ReviewFile | null = file) {
     if (!sourceFile || !snapshot) return;
     setReadingPosition(positionFor(sourceFile, side, line));
@@ -1925,7 +1980,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.9</span>
+          <span className="version-tag">v0.0.10</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -1946,11 +2001,12 @@ export function App() {
           </button>
         </div>
       </header>
-      <div className="app-body">
-        <aside className="sidebar">
+      <div className={`app-body${review && !snapshotFormOpen ? ' snapshot-compact' : ''}`}>
+        <aside className="sidebar" id="snapshot-sidebar">
           <div className="sidebar-heading">
             <Icon name="branch" />
             <span>建立审查快照</span>
+            {review && <button type="button" className="sidebar-collapse" onClick={() => setSnapshotFormOpen(false)}>收起</button>}
           </div>
           <p className="sidebar-description">选择源码范围，固定待审查的内容。</p>
           <form className="snapshot-form" onSubmit={createReview}>
@@ -2314,6 +2370,10 @@ export function App() {
                 <div>
                   <div className="eyebrow">
                     REVIEW SNAPSHOT <span>{snapshot.id.slice(0, 6)}</span>
+                    <button type="button" className="snapshot-select-button" aria-controls="snapshot-sidebar"
+                      aria-expanded={snapshotFormOpen} onClick={() => setSnapshotFormOpen((open) => !open)}>
+                      {snapshotFormOpen ? '收起选择' : '重新选择'}
+                    </button>
                   </div>
                   <h1>
                     {basename(snapshot.repo)} <span className="snapshot-badge">固定快照</span>
@@ -2802,47 +2862,9 @@ export function App() {
                       ) : review.guide ? (
                         <>
                           <p className="nav-caption">{review.commitContext ? '按功能查看 · 点击后列出文件和变更块' : '旧版阅读分组 · 重新生成后按功能整理'}</p>
-                          {review.guide.groups.map((item, index) => {
-                            const files = featureFiles(snapshot, item);
-                            return <div className="feature-nav-entry" key={index}>
-                              <button
-                                className={`group-item ${selectedGroup === index ? 'active' : ''}`}
-                                aria-expanded={selectedGroup === index}
-                                onClick={() => chooseGroup(index)}
-                              >
-                                <span>{String(index + 1).padStart(2, '0')}</span>
-                                <div>
-                                  <strong>{item.title}</strong>
-                                  <small>{files.length} 个文件 · {item.changeIds.length} 处变更 · {groupStatusLabel(index)}</small>
-                                </div>
-                              </button>
-                              {selectedGroup === index && <div className="feature-file-list" aria-label={`${item.title}对应的文件改动`}>
-                                {files.map(({ file: sourceFile, changes: fileChanges }) => <div className="feature-file" key={sourceFile.id}>
-                                  <button type="button" className="feature-file-name"
-                                    onClick={() => jumpToChange(sourceFile, fileChanges[0])} title={sourceFile.path}>
-                                    {sourceFile.path} <small>{fileChanges.length} 处</small>
-                                  </button>
-                                  {fileChanges.map((change) => <button type="button" className="feature-change"
-                                    key={change.id} onClick={() => jumpToChange(sourceFile, change)}>
-                                    {change.label}
-                                  </button>)}
-                                </div>)}
-                              </div>}
-                            </div>;
-                          })}
-                          {review.guide.unreviewed.length > 0 && (
-                            <div className="unreviewed">
-                              <strong>未分析／待核对 · {review.guide.unreviewed.length}</strong>
-                              {review.guide.unreviewed.map((item) => {
-                                const sourceFile = snapshot.files.find((file) => file.changes.some((change) => change.id === item.changeId));
-                                const change = sourceFile?.changes.find((entry) => entry.id === item.changeId);
-                                return <button type="button" className="unreviewed-change" key={item.changeId}
-                                  onClick={() => { setSelectedGroup(-1); if (sourceFile && change) jumpToChange(sourceFile, change); }}>
-                                  {sourceFile?.path} · {change?.label}：{item.reason}
-                                </button>;
-                              })}
-                            </div>
-                          )}
+                          <FeatureList review={review} selectedGroup={selectedGroup} statusLabel={groupStatusLabel}
+                            onGroup={chooseGroup} onChange={(_, sourceFile, change) => jumpToChange(sourceFile, change)}
+                            onUnreviewed={(sourceFile, change) => { setSelectedGroup(-1); jumpToChange(sourceFile, change); }} />
                         </>
                       ) : (
                         <div className="nav-empty">
@@ -2876,24 +2898,15 @@ export function App() {
                           <button type="button" title="折叠全部文件" aria-label="折叠全部文件" onClick={() => setCollapsedFiles(new Set(visibleFiles.map((item) => item.id)))}>折叠</button>
                         </div>
                       )}
+                      <div className="diff-layout-switch" role="group" aria-label="差异布局">
+                        <button type="button" aria-pressed={diffLayout === 'side-by-side'}
+                          onClick={() => setDiffLayout('side-by-side')}>并排</button>
+                        <button type="button" aria-pressed={diffLayout === 'inline'}
+                          onClick={() => setDiffLayout('inline')}>内联</button>
+                      </div>
                       <details className="diff-options">
                         <summary aria-label="差异显示设置" title="差异显示设置">显示设置 ▾</summary>
                         <div className="diff-options-menu">
-                          <strong>比较变更</strong>
-                          <button
-                            type="button"
-                            aria-pressed={diffLayout === 'side-by-side'}
-                            onClick={() => setDiffLayout('side-by-side')}
-                          >
-                            {diffLayout === 'side-by-side' ? '✓' : ''} 并排
-                          </button>
-                          <button
-                            type="button"
-                            aria-pressed={diffLayout === 'inline'}
-                            onClick={() => setDiffLayout('inline')}
-                          >
-                            {diffLayout === 'inline' ? '✓' : ''} 内联
-                          </button>
                           <label title="控制纯空白变更的差异高亮">
                             <input type="checkbox" checked={showWhitespaceChanges} onChange={(event) => setShowWhitespaceChanges(event.target.checked)} />
                             显示空白变更内容
@@ -3053,6 +3066,20 @@ export function App() {
                           </details>
                         )}
                       </div>
+                      {review.guide && <section className="feature-overview" aria-label="本次按功能改了什么">
+                        <h2>本次按功能改了什么</h2>
+                        <p className="guide-overview">{review.guide.overview}</p>
+                        <div className="feature-overview-counts">
+                          {review.guide.groups.length} 个{review.commitContext ? '功能或变更主题' : '阅读分组'} · 已归类 {review.guide.groups.reduce((count, item) => count + item.changeIds.length, 0)}/{changes.length} 处变更
+                          {' · '}待人工核对 {review.guide.unreviewed.length} 处
+                        </div>
+                        <FeatureList review={review} selectedGroup={selectedGroup} statusLabel={groupStatusLabel}
+                          onGroup={(index) => { setNavigation('guide'); chooseGroup(index); }}
+                          onChange={chooseFeatureChange}
+                          onUnreviewed={(sourceFile, change) => {
+                            setNavigation('guide'); setSelectedGroup(-1); jumpToChange(sourceFile, change);
+                          }} />
+                      </section>}
                       {review.guide && <V8ReviewPanel key={snapshot.id} review={review}
                         changeId={readingPosition?.changeId} fresh={fileStatesFresh} stale={freshness?.fresh === false} busy={busy}
                         canGenerate={Boolean(status?.subscription)}
@@ -3067,11 +3094,6 @@ export function App() {
                         onSource={showRef} />}
                       {review.guide ? (
                         <>
-                          <p className="guide-overview">{review.guide.overview}</p>
-                          <div className="feature-overview-counts">
-                            {review.guide.groups.length} 个{review.commitContext ? '功能或变更主题' : '阅读分组'} · 已归类 {review.guide.groups.reduce((count, item) => count + item.changeIds.length, 0)}/{changes.length} 处变更
-                            {review.guide.unreviewed.length > 0 && ` · 待人工核对 ${review.guide.unreviewed.length} 处`}
-                          </div>
                           {review.commitContext && <details className="commit-context">
                             <summary>参考提交描述 · {review.commitContext.messages.length} 条（仅作为作者意图线索）</summary>
                             {review.commitContext.note && <p>{review.commitContext.note}</p>}
