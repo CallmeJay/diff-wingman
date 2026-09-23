@@ -9,6 +9,7 @@ import type { ReviewFile, Side, SourceRef } from '../shared/types.js';
 import { buildDiffBlocks, type DiffLine } from './diff-lines.js';
 
 export type DiffJump = { side: Side; line: number; token: number };
+export type CommentMarker = { side: Side; line: number; resolved: boolean };
 
 (self as typeof self & { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
   getWorker: () => new EditorWorker(),
@@ -31,6 +32,7 @@ export function CodePanel({
   showFullFile,
   jump,
   onPosition,
+  comments = [],
 }: {
   file: ReviewFile | null;
   activeRef: SourceRef | null;
@@ -40,6 +42,7 @@ export function CodePanel({
   showFullFile: boolean;
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
+  comments?: CommentMarker[];
 }) {
   const host = useRef<HTMLDivElement>(null);
   const diffEditor = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
@@ -171,6 +174,23 @@ export function CodePanel({
     editor.revealLineInCenter(activeRef.startLine);
   }, [activeRef, file]);
 
+  const markerKey = JSON.stringify(comments);
+  useEffect(() => {
+    if (!file) return;
+    const decorations = (['before', 'after'] as const).map((side) => {
+      const editor = editors.current[side];
+      if (!editor) return null;
+      editor.updateOptions({ glyphMargin: comments.some((item) => item.side === side && item.line > 0) });
+      const ids = editor.deltaDecorations([], comments.filter((item) => item.side === side && item.line > 0).map((item) => ({
+        range: new monaco.Range(item.line, 1, item.line, 1),
+        options: { isWholeLine: true, glyphMarginClassName: item.resolved ? 'review-comment-glyph resolved' : 'review-comment-glyph',
+          glyphMarginHoverMessage: { value: item.resolved ? '已解决评论' : '未解决评论' } },
+      })));
+      return () => editor.deltaDecorations(ids, []);
+    });
+    return () => decorations.forEach((dispose) => dispose?.());
+  }, [file, markerKey]);
+
   if (file?.issue)
     return (
       <div className="code-unavailable">
@@ -194,6 +214,7 @@ export function StaticDiffPanel({
   showFullFile,
   jump,
   onPosition,
+  comments = [],
 }: {
   file: ReviewFile;
   diffLayout: 'side-by-side' | 'inline';
@@ -203,6 +224,7 @@ export function StaticDiffPanel({
   showFullFile: boolean;
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
+  comments?: CommentMarker[];
 }) {
   const host = useRef<HTMLDivElement>(null);
   const suppressScroll = useRef(false);
@@ -235,9 +257,10 @@ export function StaticDiffPanel({
     return () => cancelAnimationFrame(frame);
   }, [jump?.token, file, diffLayout, showWhitespaceChanges, expanded]);
 
-  const renderLine = (side: Side, line: DiffLine | undefined, changed: boolean) =>
-    line ? (
-      <button
+  const renderLine = (side: Side, line: DiffLine | undefined, changed: boolean) => {
+    if (!line) return <div className="static-diff-line empty" />;
+    const markers = comments.filter((item) => item.side === side && item.line === line.number);
+    return <button
         type="button"
         className={`static-diff-line${changed ? side === 'before' ? ' removed' : ' added' : ''}`}
         aria-label={`${side === 'before' ? '修改前' : '修改后'}第 ${line.number} 行`}
@@ -247,8 +270,9 @@ export function StaticDiffPanel({
         onClick={() => onLine(side, line.number)}
       >
         <span>{line.number}</span><code>{line.text.replace(/\r$/, '') || ' '}</code>
-      </button>
-    ) : <div className="static-diff-line empty" />;
+        {markers.length > 0 && <span className={`static-comment-marker${markers.every((item) => item.resolved) ? ' resolved' : ''}`} title={`${markers.length} 条评论`}>●{markers.length}</span>}
+      </button>;
+  };
 
   const renderRows = (block: typeof blocks[number], blockIndex: number, start: number, end: number) =>
     diffLayout === 'side-by-side' ?

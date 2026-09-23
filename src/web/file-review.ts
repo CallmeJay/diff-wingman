@@ -1,5 +1,6 @@
 import type { ReviewFile, SavedReview } from '../shared/types.js';
 import { fileFingerprint } from '../shared/review-core.js';
+import { hunkFingerprint } from '../shared/incremental.js';
 
 export type FileStatus = 'unread' | 'in_progress' | 'question' | 'reviewed';
 export type FileCategory = 'source' | 'test' | 'config' | 'style' | 'docs' | 'lock' | 'other';
@@ -19,8 +20,16 @@ export const defaultFileFilters: FileFilters = {
 };
 
 export function currentFileStatus(review: SavedReview, file: ReviewFile, fresh: boolean): FileStatus {
+  if (!fresh) return 'unread';
   const saved = review.fileStates?.[file.id];
-  return fresh && saved?.fingerprint === fileFingerprint(file) ? saved.status : 'unread';
+  if (saved?.fingerprint === fileFingerprint(file)) return saved.status;
+  const states = file.changes.filter((item) => item.id.includes(':hunk-')).map((change) => {
+    const state = review.hunkStates?.[change.id];
+    return state && state.fingerprint === hunkFingerprint(file, change) ? state.status : 'unread';
+  });
+  if (states.includes('question')) return 'question';
+  if (states.length && states.every((status) => status === 'reviewed')) return 'reviewed';
+  return states.some((status) => status !== 'unread') ? 'in_progress' : 'unread';
 }
 
 export function fileCategory(path: string): FileCategory {

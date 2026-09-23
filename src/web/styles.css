@@ -714,6 +714,32 @@ textarea {
   color: #936d33;
   font-size: 11px;
 }
+.comment-suggestion {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  background: #f3f7f1;
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+}
+.incremental-list { display: grid; gap: 6px; }
+.incremental-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 11px;
+}
+.incremental-item strong { overflow-wrap: anywhere; }
+.incremental-item small { color: var(--muted); }
+.incremental-hunk-reasons { width: 100%; color: #647266; }
+.incremental-hunk-reasons p { margin: 5px 0; overflow-wrap: anywhere; }
+.comment-overview .mr-panel-content { max-height: 360px; overflow: auto; }
+.review-comment-glyph { background: #be7730; border-radius: 50%; width: 8px !important; height: 8px !important; margin: 6px; }
+.review-comment-glyph.resolved { background: #7aa184; }
 .review-stats {
   flex-shrink: 0;
   display: flex;
@@ -1227,6 +1253,7 @@ textarea {
   background: #fff;
   text-align: left;
   color: #344138;
+  position: relative;
 }
 .static-diff-line > span {
   padding: 3px 4px;
@@ -1239,7 +1266,19 @@ textarea {
   padding: 3px 8px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  padding-right: 36px;
 }
+.static-comment-marker {
+  position: absolute;
+  right: 5px;
+  top: 2px;
+  color: #ae6d2b;
+  font-size: 10px;
+  background: #fff8ee;
+  border-radius: 9px;
+  padding: 1px 4px;
+}
+.static-comment-marker.resolved { color: #5c8664; background: #edf7ee; }
 .static-diff-line.removed {
   background: #fff0ef;
 }

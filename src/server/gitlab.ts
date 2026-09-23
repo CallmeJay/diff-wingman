@@ -131,6 +131,37 @@ export function assertCommentLine(
   return file;
 }
 
+export function assertCommentAnchor(
+  binding: GitLabMergeRequest,
+  path: string,
+  side: Side,
+  line: number,
+  scope: 'line' | 'range' | 'file' = 'line',
+  endLine?: number,
+): GitLabDiffFile {
+  const file = binding.files.find((item) => item.path === path);
+  if (!file) throw new AppError(400, '评论文件不属于当前 MR diff。');
+  if (scope === 'file') {
+    if (line !== 0 || endLine !== undefined)
+      throw new AppError(400, '文件级评论不接受行号。');
+    return file;
+  }
+  if (scope === 'line') {
+    if (endLine !== undefined) throw new AppError(400, '单行评论不接受结束行号。');
+    return assertCommentLine(binding, path, side, line);
+  }
+  if (!endLine || endLine <= line)
+    throw new AppError(400, '多行评论需要大于起始行的结束行号。');
+  const lines = side === 'after' ? file.addedLines : file.deletedLines;
+  if (endLine - line + 1 > lines.length)
+    throw new AppError(400, '多行评论必须位于同侧连续变更行。');
+  const changed = new Set(lines);
+  for (let current = line; current <= endLine; current++)
+    if (!changed.has(current))
+      throw new AppError(400, '多行评论必须位于同侧连续变更行。');
+  return file;
+}
+
 export class GitLabClient implements GitLabReader {
   constructor(private readonly request: typeof fetch = fetch) {}
 

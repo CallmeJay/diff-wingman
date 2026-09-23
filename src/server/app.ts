@@ -1,18 +1,21 @@
 import express from 'express';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import type { Requirement, ReviewFile, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
+import type { Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
 import { listClaims } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
+import { compareMrVersions, hunkFingerprint, inheritMrReview } from '../shared/incremental.js';
 import {
   answerSchema,
   claimStateInputSchema,
   commentDraftEditSchema,
   commentDraftInputSchema,
   fileStateInputSchema,
+  hunkStateInputSchema,
   gitlabImportInputSchema,
   guideSchema,
   localCommentInputSchema,
+  localCommentEditSchema,
   noteInputSchema,
   questionInputSchema,
   readingPositionInputSchema,
@@ -28,7 +31,7 @@ import { CodexProvider, getCodexStatus, type GuideProvider } from './codex.js';
 import { ReviewStore } from './store.js';
 import { formatCommentDrafts, formatReviewReport } from './report.js';
 import {
-  assertCommentLine,
+  assertCommentAnchor,
   assertDiffMatchesSnapshot,
   GitLabClient,
   type GitLabReader,
@@ -103,6 +106,22 @@ export function createApp(options: {
     const source = side === 'before' ? file.before : file.after;
     if (source === null || line > sourceLineCount(source))
       throw new AppError(400, '评论或阅读位置不属于此快照的源码。');
+  };
+  const localAnchor = (
+    file: ReviewFile, side: 'before' | 'after', line: number,
+    scope: 'line' | 'range' | 'file' = 'line', endLine?: number,
+  ) => {
+    // 本地评论允许完整源码范围；MR 草稿另由平台 diff 的可评论行校验。
+    if (scope === 'file') {
+      if (line !== 0 || endLine !== undefined) throw new AppError(400, '文件级评论不接受行号。');
+      return;
+    }
+    if (line < 1) throw new AppError(400, '评论行号必须大于零。');
+    sourceAt(file, side, line);
+    if (scope === 'range') {
+      if (!endLine || endLine <= line) throw new AppError(400, '多行评论需要大于起始行的结束行号。');
+      sourceAt(file, side, endLine);
+    } else if (endLine !== undefined) throw new AppError(400, '单行评论不接受结束行号。');
   };
 
   app.disable('x-powered-by');
@@ -188,6 +207,19 @@ export function createApp(options: {
       .slice(0, 32);
     snapshot.baseLabel = `MR !${binding.iid} 基线`;
     snapshot.targetLabel = `MR !${binding.iid} 目标`;
+    let previous: SavedReview | undefined;
+    let comparison: ReturnType<typeof compareMrVersions> | undefined;
+    if (input.previousReviewId) {
+      previous = await store.get(input.previousReviewId);
+      if (!previous.gitlab || previous.gitlab.url !== binding.url ||
+          previous.snapshot.repo !== snapshot.repo || previous.gitlab.versionId >= binding.versionId)
+        throw new AppError(400, '增量基线必须是同一仓库、同一 MR 的较早版本。');
+      const candidate: SavedReview = { snapshot, gitlab: binding, guide: null, notes: {}, answers: [] };
+      comparison = compareMrVersions(previous, candidate);
+      inheritMrReview(previous, candidate, comparison);
+      if ((candidate.commentDrafts?.length ?? 0) > 100 || (candidate.localComments?.length ?? 0) > 100)
+        throw new AppError(422, '继承评论超过单份快照 100 条上限。');
+    }
     await store.create(snapshot);
     await store.update(snapshot.id, (review) => {
       if (
@@ -205,6 +237,15 @@ export function createApp(options: {
         throw new AppError(409, 'GitLab 在同一 diff 版本返回了不同内容，旧草稿保留待重核。');
       review.gitlab = binding;
       review.commentDrafts ??= [];
+      if (comparison && previous) {
+        if (review.incremental && review.incremental.previousReviewId !== previous.snapshot.id)
+          throw new AppError(409, '此 MR 版本已经绑定另一份增量基线，请打开已有快照。');
+        if (!review.incremental) {
+          inheritMrReview(previous, review, comparison);
+          if ((review.commentDrafts?.length ?? 0) > 100 || (review.localComments?.length ?? 0) > 100)
+            throw new AppError(422, '继承评论超过单份快照 100 条上限。');
+        }
+      }
     });
     res.json(await store.get(snapshot.id));
   });
@@ -269,7 +310,7 @@ export function createApp(options: {
     if (!review.gitlab) throw new AppError(400, '此快照没有关联 GitLab MR。');
     if (!(await isFresh(reviewId)))
       throw new AppError(409, 'MR 版本已变化，请重新导入后核对评论位置。');
-    const file = assertCommentLine(review.gitlab, input.path, input.side, input.line);
+    const file = assertCommentAnchor(review.gitlab, input.path, input.side, input.line, input.scope, input.endLine);
     await store.update(reviewId, (latest) => {
       if (!latest.gitlab || latest.gitlab.versionId !== review.gitlab!.versionId)
         throw new AppError(409, 'MR 快照已变化，请重新打开。');
@@ -282,6 +323,7 @@ export function createApp(options: {
         id: randomUUID(),
         oldPath: file.oldPath,
         versionId: review.gitlab!.versionId,
+        anchorStatus: 'current',
         createdAt: now,
         updatedAt: now,
       });
@@ -297,11 +339,33 @@ export function createApp(options: {
     if (!review.gitlab) throw new AppError(400, '此快照没有关联 GitLab MR。');
     if (!(await isFresh(reviewId)))
       throw new AppError(409, 'MR 版本已变化，请重新导入后核对评论位置。');
+    if (input.path === undefined && (input.side !== undefined || input.line !== undefined ||
+      input.scope !== undefined || input.endLine !== undefined))
+      throw new AppError(400, '重新定位草稿需要完整的文件、侧别和行号。');
+    const relocated = input.path !== undefined
+      ? input.side !== undefined && input.line !== undefined
+        ? assertCommentAnchor(review.gitlab, input.path, input.side, input.line, input.scope, input.endLine)
+        : null
+      : undefined;
+    if (relocated === null) throw new AppError(400, '重新定位草稿需要完整的文件、侧别和行号。');
     await store.update(reviewId, (latest) => {
       const draft = latest.commentDrafts?.find((item) => item.id === req.params.draftId);
       if (!draft) throw new AppError(404, '未找到此评论草稿。');
       draft.body = input.body;
       draft.evidence = input.evidence;
+      if (input.category !== undefined) draft.category = input.category;
+      if (input.suggestion !== undefined) draft.suggestion = input.suggestion;
+      if (input.resolved !== undefined) draft.resolved = input.resolved;
+      if (relocated && input.path && input.side !== undefined && input.line !== undefined) {
+        draft.path = input.path;
+        draft.oldPath = relocated.oldPath;
+        draft.side = input.side;
+        draft.line = input.line;
+        draft.scope = input.scope ?? 'line';
+        draft.endLine = input.endLine;
+        draft.anchorStatus = 'current';
+        draft.anchorReason = '人工重新定位';
+      }
       draft.updatedAt = new Date().toISOString();
     });
     res.json(await store.get(reviewId));
@@ -491,12 +555,46 @@ export function createApp(options: {
         throw new AppError(409, '文件内容身份已变化，请重新打开快照。');
       review.fileStates ??= {};
       // 未阅读是旧记录的默认状态，删除显式状态避免自动完成或跨版本继承。
-      if (input.status === 'unread') delete review.fileStates[input.fileId];
+      if (input.status === 'unread') {
+        delete review.fileStates[input.fileId];
+        for (const change of file.changes) delete review.hunkStates?.[change.id];
+      }
       else review.fileStates[input.fileId] = {
         status: input.status,
         fingerprint: input.fingerprint,
         updatedAt: new Date().toISOString(),
       };
+      if (input.status === 'reviewed') {
+        review.hunkStates ??= {};
+        for (const change of file.changes.filter((item) => item.id.includes(':hunk-')))
+          review.hunkStates[change.id] = { status: 'reviewed', fingerprint: hunkFingerprint(file, change), updatedAt: new Date().toISOString() };
+      }
+    });
+    res.json(await store.get(reviewId));
+  });
+
+  app.put('/api/reviews/:id/hunk-states', async (req, res) => {
+    const reviewId = id(req.params.id);
+    const input = hunkStateInputSchema.parse(req.body);
+    if (!(await isFresh(reviewId)))
+      throw new AppError(409, '源码已变化，请创建新快照后再更新变更块状态。');
+    await store.update(reviewId, (review) => {
+      const file = review.snapshot.files.find((item) => item.id === input.fileId);
+      const change = file?.changes.find((item) => item.id === input.changeId && item.id.includes(':hunk-'));
+      if (!file || !change)
+        throw new AppError(409, '变更块不属于当前快照，请重新打开。');
+      const fingerprint = hunkFingerprint(file, change);
+      review.hunkStates ??= {};
+      if (input.status === 'unread') delete review.hunkStates[change.id];
+      else review.hunkStates[change.id] = { status: input.status, fingerprint,
+        updatedAt: new Date().toISOString() };
+      const statuses = file.changes.filter((item) => item.id.includes(':hunk-'))
+        .map((item) => review.hunkStates?.[item.id]?.status ?? 'unread');
+      review.fileStates ??= {};
+      if (statuses.length && statuses.every((status) => status === 'reviewed'))
+        review.fileStates[file.id] = { status: 'reviewed', fingerprint: fileFingerprint(file), updatedAt: new Date().toISOString() };
+      else if (review.fileStates[file.id]?.status === 'reviewed')
+        delete review.fileStates[file.id];
     });
     res.json(await store.get(reviewId));
   });
@@ -526,7 +624,7 @@ export function createApp(options: {
       const file = review.snapshot.files.find((item) => item.id === input.fileId);
       if (!file || fileFingerprint(file) !== input.fingerprint)
         throw new AppError(409, '文件内容身份已变化，请重新打开快照。');
-      sourceAt(file, input.side, input.line);
+      localAnchor(file, input.side, input.line, input.scope, input.endLine);
       review.localComments ??= [];
       if (review.localComments.length >= 100)
         throw new AppError(422, '每份快照最多保存 100 条本地评论。');
@@ -535,6 +633,7 @@ export function createApp(options: {
         ...input,
         id: randomUUID(),
         path: file.path,
+        anchorStatus: 'current',
         createdAt: now,
         updatedAt: now,
       });
@@ -544,19 +643,38 @@ export function createApp(options: {
 
   app.put('/api/reviews/:id/local-comments/:commentId', async (req, res) => {
     const reviewId = id(req.params.id);
-    const input = commentDraftEditSchema.parse(req.body);
+    const input = localCommentEditSchema.parse(req.body);
     if (!/\S/.test(input.body) || !/\S/.test(input.evidence))
       throw new AppError(400, '评论问题和人工依据都不能为空。');
     if (!(await isFresh(reviewId)))
       throw new AppError(409, '源码已变化，请创建新快照后再编辑评论。');
+    if (input.fileId === undefined && (input.fingerprint !== undefined ||
+      input.side !== undefined || input.line !== undefined || input.scope !== undefined || input.endLine !== undefined))
+      throw new AppError(400, '重新定位评论需要完整的文件、侧别和行号。');
     await store.update(reviewId, (review) => {
       const comment = review.localComments?.find((item) => item.id === req.params.commentId);
       if (!comment) throw new AppError(404, '未找到此本地评论。');
-      const file = review.snapshot.files.find((item) => item.id === comment.fileId);
-      if (!file || fileFingerprint(file) !== comment.fingerprint)
+      const file = review.snapshot.files.find((item) => item.id === (input.fileId ?? comment.fileId));
+      if (input.fileId) {
+        if (!file || fileFingerprint(file) !== input.fingerprint || input.side === undefined || input.line === undefined)
+          throw new AppError(409, '重新定位的文件内容身份已变化。');
+        localAnchor(file, input.side, input.line, input.scope, input.endLine);
+        comment.fileId = file.id;
+        comment.fingerprint = input.fingerprint!;
+        comment.path = file.path;
+        comment.side = input.side;
+        comment.line = input.line;
+        comment.scope = input.scope ?? 'line';
+        comment.endLine = input.endLine;
+        comment.anchorStatus = 'current';
+        comment.anchorReason = '人工重新定位';
+      } else if (comment.anchorStatus !== 'pending' && (!file || fileFingerprint(file) !== comment.fingerprint))
         throw new AppError(409, '评论对应的文件内容身份已变化。');
       comment.body = input.body;
       comment.evidence = input.evidence;
+      if (input.category !== undefined) comment.category = input.category;
+      if (input.suggestion !== undefined) comment.suggestion = input.suggestion;
+      if (input.resolved !== undefined) comment.resolved = input.resolved;
       comment.updatedAt = new Date().toISOString();
     });
     res.json(await store.get(reviewId));

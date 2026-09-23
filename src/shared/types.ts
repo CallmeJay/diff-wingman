@@ -122,6 +122,35 @@ export interface FileReviewState {
   updatedAt: string;
 }
 
+export interface HunkReviewState extends FileReviewState {
+  inheritedFrom?: string;
+}
+
+export interface IncrementalHunk {
+  changeId: string;
+  status: 'new' | 'unchanged' | 'ambiguous';
+  previousChangeId?: string;
+  reason: string;
+}
+
+export interface IncrementalFile {
+  fileId?: string;
+  previousFileId?: string;
+  path: string;
+  status: 'new' | 'modified' | 'unchanged' | 'removed' | 'ambiguous';
+  reason: string;
+  hunks: IncrementalHunk[];
+  removedHunks: { changeId: string; label: string }[];
+}
+
+export interface IncrementalComparison {
+  previousReviewId: string;
+  previousVersionId: number;
+  currentVersionId: number;
+  origin: 'source-update' | 'base-update' | 'uncertain';
+  files: IncrementalFile[];
+}
+
 export interface ReadingPosition {
   fileId: string;
   side: Side;
@@ -140,7 +169,17 @@ export interface LocalComment {
   evidence: string;
   createdAt: string;
   updatedAt: string;
+  scope?: 'line' | 'range' | 'file';
+  endLine?: number;
+  category?: CommentCategory;
+  suggestion?: string;
+  resolved?: boolean;
+  anchorStatus?: 'current' | 'pending';
+  anchorReason?: string;
+  inheritedFrom?: string;
 }
+
+export type CommentCategory = 'problem' | 'blocking' | 'suggestion' | 'detail';
 
 export interface Answer {
   statements: Statement[];
@@ -153,6 +192,8 @@ export interface SavedReview {
   commentDrafts?: CommentDraft[];
   localComments?: LocalComment[];
   fileStates?: Record<string, FileReviewState>;
+  hunkStates?: Record<string, HunkReviewState>;
+  incremental?: IncrementalComparison;
   readingPosition?: ReadingPosition;
   guide: Guide | null;
   groupHashes?: string[];
@@ -200,6 +241,14 @@ export interface CommentDraft {
   versionId: number;
   createdAt: string;
   updatedAt: string;
+  scope?: 'line' | 'range' | 'file';
+  endLine?: number;
+  category?: CommentCategory;
+  suggestion?: string;
+  resolved?: boolean;
+  anchorStatus?: 'current' | 'pending';
+  anchorReason?: string;
+  inheritedFrom?: string;
 }
 
 export interface VerificationCase {
@@ -259,6 +308,7 @@ export interface ReviewSummary {
   hasGuide: boolean;
   mode?: SnapshotMode;
   gitlabUrl?: string;
+  gitlabVersionId?: number;
 }
 
 export interface CodexStatus {

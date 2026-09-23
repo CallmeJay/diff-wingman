@@ -117,6 +117,7 @@ export class ReviewStore {
         hasGuide: guide !== null,
         mode: snapshot.mode ?? 'commits',
         gitlabUrl: gitlab?.url,
+        gitlabVersionId: gitlab?.versionId,
       }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }

@@ -30,19 +30,25 @@ function commentDraftLines(review: SavedReview, fresh: boolean): string[] {
   ];
   if (!review.commentDrafts?.length) lines.push('尚无评论草稿。', '');
   for (const draft of review.commentDrafts ?? []) {
+    const location = draft.scope === 'file' ? '文件级' :
+      `${draft.line}${draft.scope === 'range' && draft.endLine ? `-${draft.endLine}` : ''}（${draft.side === 'after' ? '新增行' : '删除行'}）`;
     lines.push(
-      `### ${escapeText(draft.path)}:${draft.line}（${
-        draft.side === 'after' ? '新增行' : '删除行'
-      }）`,
+      `### ${escapeText(draft.path)}:${location}`,
       '',
       `- 位置：${escapeText(draft.oldPath)} → ${escapeText(draft.path)}`,
       `- 关联 diff 版本：${draft.versionId}${
-        fresh && draft.versionId === binding.versionId ? '' : '（待重核）'
+        fresh && draft.versionId === binding.versionId && draft.anchorStatus !== 'pending' ? '' : '（待重核）'
       }`,
+      `- 类型：${({ problem: '问题', blocking: '阻断', suggestion: '建议', detail: '细节' } as const)[draft.category ?? 'problem']}`,
+      `- 本地状态：${draft.resolved ? '已解决' : '未解决'}${draft.anchorStatus === 'pending' ? '；位置待重新定位' : ''}`,
       `- 问题：${escapeText(draft.body)}`,
       `- 人工依据：${escapeText(draft.evidence)}`,
       '',
     );
+    if (draft.suggestion) {
+      const fence = '`'.repeat(Math.max(3, ...[...draft.suggestion.matchAll(/`+/g)].map((match) => match[0].length + 1)));
+      lines.push(`${fence}suggestion`, draft.suggestion, fence, '');
+    }
   }
   return lines;
 }

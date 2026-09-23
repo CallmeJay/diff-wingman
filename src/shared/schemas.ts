@@ -79,16 +79,26 @@ export const gitlabImportInputSchema = z
     url: z.string().min(1).max(4096),
     requirements: z.string().max(10_000).optional(),
     preserve: z.string().max(10_000).optional(),
+    previousReviewId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   })
   .strict();
+
+const commentFields = {
+  scope: z.enum(['line', 'range', 'file']).optional(),
+  endLine: z.number().int().positive().optional(),
+  category: z.enum(['problem', 'blocking', 'suggestion', 'detail']).optional(),
+  suggestion: z.string().max(5000).optional(),
+  resolved: z.boolean().optional(),
+};
 
 export const commentDraftInputSchema = z
   .object({
     path: z.string().min(1).max(4096),
     side: z.enum(['before', 'after']),
-    line: z.number().int().positive(),
+    line: z.number().int().nonnegative(),
     body: z.string().min(1).max(5000),
     evidence: z.string().min(1).max(5000),
+    ...commentFields,
   })
   .strict();
 
@@ -96,6 +106,10 @@ export const commentDraftEditSchema = z
   .object({
     body: z.string().min(1).max(5000),
     evidence: z.string().min(1).max(5000),
+    ...commentFields,
+    path: z.string().min(1).max(4096).optional(),
+    side: z.enum(['before', 'after']).optional(),
+    line: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -134,6 +148,12 @@ export const fileStateInputSchema = z.object({
   status: z.enum(['unread', 'in_progress', 'question', 'reviewed']),
 }).strict();
 
+export const hunkStateInputSchema = z.object({
+  fileId: z.string().min(1).max(100),
+  changeId: z.string().min(1).max(100),
+  status: z.enum(['unread', 'in_progress', 'question', 'reviewed']),
+}).strict();
+
 export const readingPositionInputSchema = z.object({
   fileId: z.string().min(1).max(100),
   side: z.enum(['before', 'after']),
@@ -145,10 +165,16 @@ export const localCommentInputSchema = z.object({
   fileId: z.string().min(1).max(100),
   fingerprint: z.string().min(1).max(10000),
   side: z.enum(['before', 'after']),
-  line: z.number().int().positive(),
+  line: z.number().int().nonnegative(),
   body: z.string().min(1).max(5000),
   evidence: z.string().min(1).max(5000),
+  ...commentFields,
 }).strict();
+
+export const localCommentEditSchema = commentDraftEditSchema.omit({ path: true }).extend({
+  fileId: z.string().min(1).max(100).optional(),
+  fingerprint: z.string().min(1).max(10000).optional(),
+});
 
 export const verificationInputSchema = z
   .object({

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.0.6-3f684c" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.0.7-3f684c" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-3f684c" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-%3E%3D20.19-3f684c" />
   <img alt="Electron" src="https://img.shields.io/badge/Electron-44-3f684c" />
@@ -29,9 +29,10 @@ Diff Wingman 是一个本地代码审查工具，适合在 AI 参与开发后梳
 | Diff 阅读 | 并排/内联布局、变更块上下文折叠与展开、逐块导航、单文件阅读模式 |
 | AI 导读 | 使用 Codex 生成阅读路线、需求对照和流程步骤；大 diff 自动分批分析并合并 |
 | 影响上下文 | 为 JS、TS、JSX 变更补充函数范围、定义和静态引用 |
-| 人工审查 | 文件级审查进度、本地评论、笔记、逐条判断、核实依据和 Markdown 审查报告 |
+| 人工审查 | 文件与变更块审查状态、本地评论、笔记、逐条判断、核实依据和 Markdown 审查报告 |
 | 隔离验证 | 在无网络、只读源码的 Docker 容器中运行选定的项目脚本 |
-| GitLab MR | 只读导入 MR，在 diff 行上保存本地评论草稿并检查版本是否过期 |
+| GitLab MR | 只读导入固定 MR 版本；手动选旧版增量复审，精确继承人工状态与评论位置 |
+| 评论闭环 | 单行、多行、文件级评论，类型、修改建议、解决状态、总览与 diff 定位 |
 
 ## 快速开始
 
@@ -80,7 +81,7 @@ pnpm desktop:make
 4. 记录逐条判断、核实依据和验证结果。
 5. 导出 Markdown 审查报告。
 
-所有笔记和人工状态都绑定到对应快照。源码或 MR 版本变化后，旧记录会标记为待重核。文件状态由 reviewer 手动设置，打开或滚动文件不会自动标记完成。
+所有笔记和人工状态都绑定到对应快照。MR 更新后可手动选择上次审查的快照；只有内容完全一致且能唯一对应的文件、变更块和评论位置才会继承，其余明确待复审或待重新定位。文件状态由 reviewer 手动设置，打开或滚动文件不会自动标记完成。
 
 在审查页面可用 `Alt+↑/↓` 切换文件、`Alt+←/→` 切换变更块、`/` 聚焦文件搜索、`Alt+R` 标记当前文件已审查、`Alt+C` 在当前位置创建评论。输入框和代码编辑器获得焦点时，这些快捷键不会触发。
 
@@ -114,7 +115,7 @@ export REVIEW_HELPER_GITLAB_TOKEN=your_read_only_token
 - 静态引用和 AI 解释都是审查线索，不代表运行时一定可达，最终结论由 reviewer 确认。
 - 源码快照、导读、笔记和报告保存在本机；默认目录不会提交到 Git。
 
-完整限制见[第六版范围说明](docs/v6-scope.md)与[验收记录](docs/v6-verification.md)。
+完整限制见[v0.0.7 范围与契约](docs/v7-scope.md)与[验收记录](docs/v7-verification.md)。
 
 ## 配置
 

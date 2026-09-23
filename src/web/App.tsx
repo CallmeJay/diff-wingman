@@ -4,6 +4,7 @@ import type {
   ClaimReviewState,
   CodexStatus,
   CommentDraft,
+  CommentCategory,
   LocalComment,
   ReadingPosition,
   ReviewSummary,
@@ -21,13 +22,22 @@ import type {
 } from '../shared/types.js';
 import { listClaims, type ReviewClaim } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
+import { hunkFingerprint } from '../shared/incremental.js';
 import { api } from './api.js';
-import { CodePanel, StaticDiffPanel, type DiffJump } from './CodePanel.js';
+import { CodePanel, StaticDiffPanel, type CommentMarker, type DiffJump } from './CodePanel.js';
 import { currentFileStatus, defaultFileFilters, fileStatusCounts, filterFiles, type FileFilters, type FileStatus } from './file-review.js';
 
 const short = (value: string) => value.slice(0, 8);
 const basename = (value: string) => value.split('/').filter(Boolean).at(-1) ?? value;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+function canonicalMrUrl(input: string): string | null {
+  try {
+    const url = new URL(input);
+    const match = /^\/(.+)\/-\/merge_requests\/([1-9]\d*)(?:\/diffs)?\/?$/.exec(url.pathname);
+    return url.protocol === 'https:' && !url.username && !url.password && match
+      ? `${url.origin}/${match[1]}/-/merge_requests/${match[2]}` : null;
+  } catch { return null; }
+}
 const fileStatusLabel: Record<FileStatus, string> = {
   unread: '未阅读', in_progress: '审查中', question: '有疑问', reviewed: '已审查',
 };
@@ -53,7 +63,22 @@ function readFileFilters(): FileFilters {
 function mergeReviewCore(current: SavedReview | null, updated: SavedReview): SavedReview {
   if (current?.snapshot.id !== updated.snapshot.id) return updated;
   return { ...updated, fileStates: current.fileStates ?? updated.fileStates,
-    localComments: current.localComments ?? updated.localComments };
+    hunkStates: current.hunkStates ?? updated.hunkStates,
+    localComments: current.localComments ?? updated.localComments,
+    commentDrafts: current.commentDrafts ?? updated.commentDrafts,
+    incremental: current.incremental ?? updated.incremental };
+}
+
+const commentCategoryLabel: Record<CommentCategory, string> = {
+  problem: '问题', blocking: '阻断', suggestion: '建议', detail: '细节',
+};
+
+function commentMarkers(review: SavedReview, file: ReviewFile): CommentMarker[] {
+  const drafts = (review.commentDrafts ?? []).filter((item) => item.path === file.path &&
+    item.scope !== 'file' && item.anchorStatus !== 'pending');
+  const local = (review.localComments ?? []).filter((item) => item.fileId === file.id && item.path === file.path &&
+    item.scope !== 'file' && item.anchorStatus !== 'pending');
+  return [...drafts, ...local].map((item) => ({ side: item.side, line: item.line, resolved: item.resolved ?? false }));
 }
 
 function Icon({
@@ -623,6 +648,7 @@ function FileDiffCard({
   showFullFile,
   jump,
   onPosition,
+  comments,
 }: {
   file: ReviewFile;
   base: string;
@@ -637,6 +663,7 @@ function FileDiffCard({
   showFullFile: boolean;
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
+  comments: CommentMarker[];
 }) {
   const card = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
@@ -666,9 +693,9 @@ function FileDiffCard({
           )}
           {visible ? (
             file.issue ? (
-              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} />
+              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} />
             ) : (
-              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} />
+              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} />
             )
           ) : (
             <div className="file-diff-placeholder" aria-hidden="true" />
@@ -684,6 +711,7 @@ export function App() {
   const [pickingRepo, setPickingRepo] = useState(false);
   const [sourceKind, setSourceKind] = useState<'local' | 'gitlab'>('local');
   const [mrUrl, setMrUrl] = useState('');
+  const [previousReviewId, setPreviousReviewId] = useState('');
   const [mode, setMode] = useState<SnapshotMode>('commits');
   const [base, setBase] = useState('');
   const [target, setTarget] = useState('');
@@ -749,6 +777,11 @@ export function App() {
   const [draftPath, setDraftPath] = useState('');
   const [draftSide, setDraftSide] = useState<Side>('after');
   const [draftLine, setDraftLine] = useState('');
+  const [draftScope, setDraftScope] = useState<'line' | 'range' | 'file'>('line');
+  const [draftEndLine, setDraftEndLine] = useState('');
+  const [draftCategory, setDraftCategory] = useState<CommentCategory>('problem');
+  const [draftSuggestion, setDraftSuggestion] = useState('');
+  const [draftResolved, setDraftResolved] = useState(false);
   const [draftBody, setDraftBody] = useState('');
   const [draftEvidence, setDraftEvidence] = useState('');
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
@@ -952,6 +985,10 @@ export function App() {
   const draftKey = `${snapshot?.id}:${noteKey}`;
   const note = drafts[draftKey] ?? review?.notes[noteKey] ?? '';
   const noteChanged = note !== (review?.notes[noteKey] ?? '');
+  const overviewComments = [
+    ...(review?.commentDrafts ?? []).map((comment) => ({ kind: 'mr' as const, comment })),
+    ...(review?.localComments ?? []).map((comment) => ({ kind: 'local' as const, comment })),
+  ];
 
   useEffect(() => {
     if (!review || !readingPosition) return;
@@ -1025,6 +1062,7 @@ export function App() {
     setRepo(value.snapshot.repo);
     setSourceKind(value.gitlab ? 'gitlab' : 'local');
     setMrUrl(value.gitlab?.url ?? '');
+    setPreviousReviewId(value.incremental?.previousReviewId ?? '');
     setMode(value.snapshot.mode ?? 'commits');
     setBase(value.gitlab ? value.snapshot.base : value.snapshot.baseLabel);
     setTarget(value.gitlab ? value.snapshot.target : value.snapshot.targetLabel);
@@ -1071,6 +1109,11 @@ export function App() {
     );
     setDraftSide('after');
     setDraftLine('');
+    setDraftScope('line');
+    setDraftEndLine('');
+    setDraftCategory('problem');
+    setDraftSuggestion('');
+    setDraftResolved(false);
     setDraftBody('');
     setDraftEvidence('');
     setEditingDraftId(null);
@@ -1100,7 +1143,7 @@ export function App() {
           method: 'POST',
           body:
             sourceKind === 'gitlab'
-              ? { repo, url: mrUrl, requirements, preserve }
+              ? { repo, url: mrUrl, requirements, preserve, ...(previousReviewId ? { previousReviewId } : {}) }
               : {
                   repo,
                   mode,
@@ -1141,6 +1184,7 @@ export function App() {
       });
       if ('repo' in result) {
         setRepo(result.repo);
+        setPreviousReviewId('');
         setVersionRefresh((current) => current + 1);
         setUntracked([]);
         setSelectedUntracked([]);
@@ -1251,21 +1295,21 @@ export function App() {
           : `/api/reviews/${savingId}/drafts`,
         {
           method: editingDraftId ? 'PUT' : 'POST',
-          body: editingDraftId
-            ? { body: draftBody, evidence: draftEvidence }
-            : {
-                path: draftPath,
-                side: draftSide,
-                line: Number(draftLine),
-                body: draftBody,
-                evidence: draftEvidence,
-              },
+          body: { path: draftPath, side: draftSide, line: draftScope === 'file' ? 0 : Number(draftLine),
+            scope: draftScope, ...(draftScope === 'range' ? { endLine: Number(draftEndLine) } : {}),
+            category: draftCategory, suggestion: draftSuggestion, resolved: draftResolved,
+            body: draftBody, evidence: draftEvidence },
         },
       );
       if (reviewId.current === savingId) {
         setReview((current) => current?.snapshot.id === savingId ? { ...current, commentDrafts: updated.commentDrafts } : current);
         setDraftBody('');
         setDraftEvidence('');
+        setDraftScope('line');
+        setDraftEndLine('');
+        setDraftCategory('problem');
+        setDraftSuggestion('');
+        setDraftResolved(false);
         setDraftLine('');
         setEditingDraftId(null);
         setDraftExport(null);
@@ -1295,6 +1339,36 @@ export function App() {
       setError(message(error));
     }
   }
+  function beginEditDraft(draft: CommentDraft) {
+    setEditingDraftId(draft.id);
+    setDraftPath(review?.gitlab?.files.some((item) => item.path === draft.path) ? draft.path : review?.gitlab?.files[0]?.path ?? '');
+    setDraftSide(draft.side);
+    setDraftLine(draft.anchorStatus === 'pending' ? '' : String(draft.line));
+    setDraftScope(draft.scope ?? 'line');
+    setDraftEndLine(draft.anchorStatus === 'pending' ? '' : draft.endLine === undefined ? '' : String(draft.endLine));
+    setDraftCategory(draft.category ?? 'problem');
+    setDraftSuggestion(draft.suggestion ?? '');
+    setDraftResolved(draft.resolved ?? false);
+    setDraftBody(draft.body);
+    setDraftEvidence(draft.evidence);
+    requestAnimationFrame(() => { if (mrPanelRef.current) { mrPanelRef.current.open = true; mrPanelRef.current.scrollIntoView({ block: 'nearest' }); } });
+  }
+  function beginEditLocalComment(comment: LocalComment, targetFile: ReviewFile) {
+    const first = firstPosition(targetFile);
+    const target = comment.anchorStatus === 'pending'
+      ? { fileId: targetFile.id, side: first?.side ?? 'after', line: comment.scope === 'file' ? 0 : first?.line ?? 0 }
+      : { fileId: targetFile.id, side: comment.side, line: comment.line };
+    setCommentTarget(target);
+    setEditingLocalCommentId(comment.id);
+    setDraftScope(comment.scope ?? 'line');
+    setDraftEndLine(comment.anchorStatus === 'pending' ? '' : comment.endLine === undefined ? '' : String(comment.endLine));
+    setDraftCategory(comment.category ?? 'problem');
+    setDraftSuggestion(comment.suggestion ?? '');
+    setDraftResolved(comment.resolved ?? false);
+    setDraftBody(comment.body);
+    setDraftEvidence(comment.evidence);
+    requestAnimationFrame(() => { if (commentSectionRef.current) { commentSectionRef.current.open = true; commentSectionRef.current.scrollIntoView({ block: 'nearest' }); } commentBodyRef.current?.focus(); });
+  }
   async function saveLocalComment(event: React.FormEvent) {
     event.preventDefault();
     if (!review || !commentTarget || !file) return;
@@ -1308,10 +1382,11 @@ export function App() {
           : `/api/reviews/${savingId}/local-comments`,
         {
           method: editingLocalCommentId ? 'PUT' : 'POST',
-          body: editingLocalCommentId
-            ? { body: draftBody, evidence: draftEvidence }
-            : { fileId: file.id, fingerprint: fileFingerprint(file), side: commentTarget.side,
-                line: commentTarget.line, body: draftBody, evidence: draftEvidence },
+          body: { fileId: file.id, fingerprint: fileFingerprint(file), side: commentTarget.side,
+            line: draftScope === 'file' ? 0 : commentTarget.line, scope: draftScope,
+            ...(draftScope === 'range' ? { endLine: Number(draftEndLine) } : {}),
+            category: draftCategory, suggestion: draftSuggestion, resolved: draftResolved,
+            body: draftBody, evidence: draftEvidence },
         },
       );
       if (reviewId.current === savingId) {
@@ -1320,6 +1395,11 @@ export function App() {
         setEditingLocalCommentId(null);
         setDraftBody('');
         setDraftEvidence('');
+        setDraftScope('line');
+        setDraftEndLine('');
+        setDraftCategory('problem');
+        setDraftSuggestion('');
+        setDraftResolved(false);
       }
     } catch (error) { setError(message(error)); }
     finally { setSavingLocalComment(false); }
@@ -1348,7 +1428,8 @@ export function App() {
       if (!current.fresh) throw new Error(current.reason ?? 'MR 版本已变化，请重新核对草稿。');
       if (draft.versionId !== review?.gitlab?.versionId)
         throw new Error('草稿对应的 diff 版本已失效。');
-      await navigator.clipboard.writeText(`${draft.body}\n\n人工依据：${draft.evidence}`);
+      const fence = '`'.repeat(Math.max(3, ...[...(draft.suggestion ?? '').matchAll(/`+/g)].map((match) => match[0].length + 1)));
+      await navigator.clipboard.writeText(`${draft.body}${draft.suggestion ? `\n\n${fence}suggestion\n${draft.suggestion}\n${fence}` : ''}\n\n人工依据：${draft.evidence}`);
     } catch (error) {
       setError(message(error));
     }
@@ -1600,6 +1681,18 @@ export function App() {
       });
     } catch (error) { setError(message(error)); }
   }
+  async function updateHunkStatus(status: FileStatus) {
+    const active = visibleHunks[activeHunkIndex];
+    if (!review || !active || !fileStatesFresh) return;
+    const savingId = review.snapshot.id;
+    try {
+      const updated = await api<SavedReview>(`/api/reviews/${savingId}/hunk-states`, {
+        method: 'PUT', body: { fileId: active.file.id, changeId: active.change.id, status },
+      });
+      if (reviewId.current === savingId) setReview((current) => current?.snapshot.id === savingId
+        ? { ...current, hunkStates: updated.hunkStates, fileStates: updated.fileStates } : current);
+    } catch (error) { setError(message(error)); }
+  }
   function openComment() {
     if (!file || !review || freshness?.fresh !== true && !fileStatesFresh) return;
     const first = firstPosition(file);
@@ -1615,6 +1708,8 @@ export function App() {
       setDraftPath(file.path);
       setDraftSide(target.side);
       setDraftLine(String(target.line));
+      setDraftScope('line');
+      setDraftEndLine('');
       if (mrPanelRef.current) {
         mrPanelRef.current.open = true;
         mrPanelRef.current.scrollIntoView({ block: 'nearest' });
@@ -1622,6 +1717,8 @@ export function App() {
     } else {
       setCommentTarget(target);
       setEditingLocalCommentId(null);
+      setDraftScope('line');
+      setDraftEndLine('');
       setDraftBody('');
       setDraftEvidence('');
       requestAnimationFrame(() => {
@@ -1707,7 +1804,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.6</span>
+          <span className="version-tag">v0.0.7</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -1746,6 +1843,7 @@ export function App() {
                   value={repo}
                   onChange={(event) => {
                     setRepo(event.target.value);
+                    setPreviousReviewId('');
                     setUntracked([]);
                     setSelectedUntracked([]);
                   }}
@@ -1775,18 +1873,28 @@ export function App() {
               </select>
             </label>
             {sourceKind === 'gitlab' ? (
-              <label>
-                GitLab MR 链接
-                <input
-                  required
-                  type="url"
-                  value={mrUrl}
-                  onChange={(event) => setMrUrl(event.target.value)}
-                  placeholder="https://gitlab.example.com/group/project/-/merge_requests/1"
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-              </label>
+              <>
+                <label>
+                  GitLab MR 链接
+                  <input
+                    required
+                    type="url"
+                    value={mrUrl}
+                    onChange={(event) => { setMrUrl(event.target.value); setPreviousReviewId(''); }}
+                    placeholder="https://gitlab.example.com/group/project/-/merge_requests/1"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+                <label>
+                  上次审查版本 <span>可选，手动选择</span>
+                  <select aria-label="上次审查版本" value={previousReviewId} onChange={(event) => setPreviousReviewId(event.target.value)}>
+                    <option value="">无，查看完整 MR diff</option>
+                    {history.filter((item) => item.repo === repo && item.gitlabUrl === canonicalMrUrl(mrUrl)).map((item) =>
+                      <option key={item.id} value={item.id}>diff v{item.gitlabVersionId} · {item.gitlabUrl} · {short(item.id)}</option>)}
+                  </select>
+                </label>
+              </>
             ) : (
               <label>
                 审查范围
@@ -2116,6 +2224,62 @@ export function App() {
                   </div>
                 </div>
               </div>
+              {review.incremental && <details className="mr-panel incremental-panel" open>
+                <summary>增量复审 · diff v{review.incremental.previousVersionId} → v{review.incremental.currentVersionId}</summary>
+                <div className="mr-panel-content">
+                  <p>完整 MR 范围仍为 merge base → 最新 source HEAD。本轮来源：{
+                    review.incremental.origin === 'source-update' ? 'source HEAD 变化；是否为作者修改需结合提交核对' :
+                    review.incremental.origin === 'base-update' ? 'merge base 变化；请核对目标分支更新影响' :
+                    '仅凭版本信息无法可靠区分 rebase 与作者修改，待确认'
+                  }。</p>
+                  <div className="incremental-list">
+                    {review.incremental.files.map((item, index) => {
+                      const current = snapshot.files.find((file) => file.id === item.fileId);
+                      const label = { new: '本轮新增', modified: '再次修改', unchanged: '保持不变', removed: '已移除', ambiguous: '待确认' }[item.status];
+                      return <div className="incremental-item" key={`${item.fileId ?? item.previousFileId}-${index}`}>
+                        <strong>{label} · {item.path}</strong><span>{item.reason}</span>
+                        {current && <button type="button" className="text-button" onClick={() => chooseFile(current.id)}>查看 diff</button>}
+                        {item.hunks.length > 0 && <small>{item.hunks.filter((hunk) => hunk.status === 'unchanged').length} 块内容不变 · {item.hunks.filter((hunk) => hunk.status === 'new').length} 块需复审 · {item.hunks.filter((hunk) => hunk.status === 'ambiguous').length} 块待确认</small>}
+                        {item.hunks.some((hunk) => hunk.reason.includes('上下文') || hunk.status === 'ambiguous') &&
+                          <details className="incremental-hunk-reasons"><summary>查看变更块对应原因</summary>
+                            {item.hunks.map((hunk) => <p key={hunk.changeId}>{current?.changes.find((change) => change.id === hunk.changeId)?.label ?? hunk.changeId}：{hunk.reason}</p>)}
+                          </details>}
+                        {item.removedHunks.length > 0 && <details className="incremental-hunk-reasons"><summary>旧版 {item.removedHunks.length} 个变更块已移除或需确认</summary>
+                          {item.removedHunks.map((hunk) => <p key={hunk.changeId}>{hunk.label} · {hunk.changeId}</p>)}
+                        </details>}
+                      </div>;
+                    })}
+                  </div>
+                </div>
+              </details>}
+              <details className="mr-panel comment-overview">
+                <summary>评论总览 · {overviewComments.length} 条 · {overviewComments.filter((item) => !item.comment.resolved).length} 条未解决</summary>
+                <div className="mr-panel-content">
+                  <p>评论状态只保存在本机；“已解决”不改变 GitLab 讨论状态。</p>
+                  {overviewComments.length === 0 && <p>当前快照尚无评论。</p>}
+                  {overviewComments.map((item) => {
+                    const comment = item.comment;
+                    const destination = item.kind === 'local'
+                      ? snapshot.files.find((row) => row.id === item.comment.fileId && row.path === comment.path)
+                      : snapshot.files.find((row) => row.path === comment.path);
+                    return <div className="mr-draft-item" key={`${item.kind}:${comment.id}`}>
+                      <strong>{commentCategoryLabel[comment.category ?? 'problem']} · {comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''}`}</strong>
+                      <span>{comment.resolved ? '已解决' : '未解决'} · {comment.anchorStatus === 'pending' ? '待重新定位' : '位置有效'} · {item.kind === 'mr' ? 'MR 本地草稿' : '本地评论'}</span>
+                      <p>{comment.body}</p>
+                      {comment.anchorReason && <small>{comment.anchorReason}</small>}
+                      <div className="mr-actions">
+                        <button type="button" className="secondary-button" disabled={!destination || comment.anchorStatus === 'pending'} onClick={() => {
+                          if (!destination) return;
+                          comment.scope === 'file' ? chooseFile(destination.id) : jumpTo(destination, comment.side, comment.line);
+                        }}>定位到 diff</button>
+                        {comment.anchorStatus === 'pending' && (item.kind === 'mr'
+                          ? <button type="button" className="secondary-button" disabled={freshness?.fresh !== true} onClick={() => beginEditDraft(item.comment)}>重新定位</button>
+                          : <button type="button" className="secondary-button" disabled={!file || !fileStatesFresh} onClick={() => { if (file) beginEditLocalComment(item.comment, file); }}>在当前文件重新定位</button>)}
+                      </div>
+                    </div>;
+                  })}
+                </div>
+              </details>
               {review.gitlab && (
                 <details className="mr-panel" ref={mrPanelRef}>
                   <summary>
@@ -2138,16 +2302,13 @@ export function App() {
                         <select
                           aria-label="草稿文件"
                           value={draftPath}
-                          disabled={Boolean(editingDraftId)}
                           onChange={(event) => {
                             setDraftPath(event.target.value);
                             setDraftLine('');
                           }}
                         >
                           <option value="">选择变更文件</option>
-                          {review.gitlab.files
-                            .filter((item) => item.addedLines.length || item.deletedLines.length)
-                            .map((item) => (
+                          {review.gitlab.files.map((item) => (
                               <option key={item.path} value={item.path}>
                                 {item.path}
                               </option>
@@ -2155,11 +2316,17 @@ export function App() {
                         </select>
                       </label>
                       <label>
+                        位置类型
+                        <select aria-label="草稿位置类型" value={draftScope} onChange={(event) => { setDraftScope(event.target.value as typeof draftScope); setDraftEndLine(''); }}>
+                          <option value="line">单行</option><option value="range">多行</option><option value="file">文件级</option>
+                        </select>
+                      </label>
+                      <label>
                         侧别
                         <select
                           aria-label="草稿侧别"
                           value={draftSide}
-                          disabled={Boolean(editingDraftId)}
+                          disabled={draftScope === 'file'}
                           onChange={(event) => {
                             setDraftSide(event.target.value as Side);
                             setDraftLine('');
@@ -2169,7 +2336,7 @@ export function App() {
                           <option value="before">删除行</option>
                         </select>
                       </label>
-                      <label>
+                      {draftScope !== 'file' && <label>
                         行号
                         <input
                           aria-label="草稿行号"
@@ -2177,10 +2344,13 @@ export function App() {
                           min="1"
                           required
                           value={draftLine}
-                          disabled={Boolean(editingDraftId)}
                           onChange={(event) => setDraftLine(event.target.value)}
                         />
-                      </label>
+                      </label>}
+                      {draftScope === 'range' && <label>
+                        结束行号
+                        <input aria-label="草稿结束行号" type="number" min="1" required value={draftEndLine} onChange={(event) => setDraftEndLine(event.target.value)} />
+                      </label>}
                       <small className="mr-lines">
                         当前可评论行：
                         {(() => {
@@ -2194,6 +2364,22 @@ export function App() {
                             : '无';
                         })()}
                       </small>
+                      <label>
+                        评论类型
+                        <select aria-label="草稿评论类型" value={draftCategory} onChange={(event) => { const category = event.target.value as CommentCategory; setDraftCategory(category); if (category !== 'suggestion') setDraftSuggestion(''); }}>
+                          {Object.entries(commentCategoryLabel).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                        </select>
+                      </label>
+                      <label>
+                        本地状态
+                        <select aria-label="草稿解决状态" value={draftResolved ? 'resolved' : 'open'} onChange={(event) => setDraftResolved(event.target.value === 'resolved')}>
+                          <option value="open">未解决</option><option value="resolved">已解决</option>
+                        </select>
+                      </label>
+                      {draftCategory === 'suggestion' && <label className="mr-wide">
+                        修改建议代码块
+                        <textarea aria-label="草稿修改建议代码" maxLength={5000} rows={4} value={draftSuggestion} onChange={(event) => setDraftSuggestion(event.target.value)} />
+                      </label>}
                       <label className="mr-wide">
                         问题描述
                         <textarea
@@ -2226,7 +2412,8 @@ export function App() {
                             !draftPath ||
                             !draftBody.trim() ||
                             !draftEvidence.trim() ||
-                            (!editingDraftId && !draftLine)
+                            (draftScope !== 'file' && !draftLine) ||
+                            (draftScope === 'range' && (!draftEndLine || Number(draftEndLine) <= Number(draftLine)))
                           }
                         >
                           {savingDraft
@@ -2244,6 +2431,11 @@ export function App() {
                               setDraftBody('');
                               setDraftEvidence('');
                               setDraftLine('');
+                              setDraftScope('line');
+                              setDraftEndLine('');
+                              setDraftCategory('problem');
+                              setDraftSuggestion('');
+                              setDraftResolved(false);
                             }}
                           >
                             取消编辑
@@ -2272,33 +2464,28 @@ export function App() {
                     {(review.commentDrafts ?? []).map((draft) => (
                       <div className="mr-draft-item" key={draft.id}>
                         <strong>
-                          {draft.path}:{draft.line} · {draft.side === 'after' ? '新增行' : '删除行'}
+                          {draft.path}{draft.scope === 'file' ? ' · 文件级' : `:${draft.line}${draft.scope === 'range' ? `-${draft.endLine}` : ''} · ${draft.side === 'after' ? '新增行' : '删除行'}`}
                         </strong>
                         <span>
-                          {freshness?.fresh === false ? '待重核 · 旧版草稿' : '未发布 · 本地草稿'}
+                          {draft.anchorStatus === 'pending' ? '待重新定位' : freshness?.fresh === false ? '待重核 · 旧版草稿' : '未发布 · 本地草稿'} · {commentCategoryLabel[draft.category ?? 'problem']} · {draft.resolved ? '已解决' : '未解决'}
                         </span>
+                        {draft.anchorReason && <small>{draft.anchorReason}</small>}
                         <p>{draft.body}</p>
                         <p>人工依据：{draft.evidence}</p>
+                        {draft.suggestion && <pre className="comment-suggestion"><code>{draft.suggestion}</code></pre>}
                         <div className="mr-actions">
                           <button
                             className="secondary-button"
                             type="button"
                             disabled={freshness?.fresh !== true}
-                            onClick={() => {
-                              setEditingDraftId(draft.id);
-                              setDraftPath(draft.path);
-                              setDraftSide(draft.side);
-                              setDraftLine(String(draft.line));
-                              setDraftBody(draft.body);
-                              setDraftEvidence(draft.evidence);
-                            }}
+                            onClick={() => beginEditDraft(draft)}
                           >
                             编辑
                           </button>
                           <button
                             className="secondary-button"
                             type="button"
-                            disabled={freshness?.fresh !== true}
+                            disabled={freshness?.fresh !== true || draft.anchorStatus === 'pending'}
                             onClick={() => void copyDraft(draft)}
                           >
                             复制评论
@@ -2317,11 +2504,54 @@ export function App() {
                 </details>
               )}
               {!review.gitlab && <details className="mr-panel" ref={commentSectionRef}>
-                <summary>当前文件的本地评论 · {(review.localComments ?? []).filter((item) => item.fileId === file?.id).length}</summary>
+                <summary>当前文件的本地评论 · {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).length}</summary>
                 <div className="mr-panel-content">
                   <p>评论只保存在当前快照，不会发布到代码托管平台。先点击 diff 行，再选择“评论当前位置”。</p>
+                  <button className="secondary-button" type="button" disabled={!file || !fileStatesFresh} onClick={() => {
+                    if (!file) return;
+                    setCommentTarget({ fileId: file.id, side: 'after', line: 0 });
+                    setEditingLocalCommentId(null); setDraftScope('file'); setDraftEndLine('');
+                    setDraftBody(''); setDraftEvidence('');
+                  }}>评论当前文件</button>
                   {commentTarget && commentTarget.fileId === file?.id && <form className="mr-draft-form" onSubmit={(event) => void saveLocalComment(event)}>
-                    <strong className="mr-wide">{file?.path}:{commentTarget.line} · {commentTarget.side === 'before' ? '修改前' : '修改后'}</strong>
+                    <strong className="mr-wide">{file?.path}{draftScope === 'file' ? ' · 文件级' : `:${commentTarget.line} · ${commentTarget.side === 'before' ? '修改前' : '修改后'}`}</strong>
+                    <label>位置类型
+                      <select aria-label="本地评论位置类型" value={draftScope} onChange={(event) => {
+                        const scope = event.target.value as typeof draftScope;
+                        if (scope !== 'file' && commentTarget.line === 0 && file) {
+                          const first = firstPosition(file);
+                          if (!first) return;
+                          setCommentTarget({ fileId: file.id, side: first.side, line: first.line });
+                        }
+                        setDraftScope(scope); setDraftEndLine('');
+                      }}><option value="line">单行</option><option value="range">多行</option><option value="file">文件级</option></select>
+                    </label>
+                    {draftScope !== 'file' && <>
+                      <label>侧别
+                        <select aria-label="本地评论侧别" value={commentTarget.side} onChange={(event) => setCommentTarget((current) => current && ({ ...current, side: event.target.value as Side }))}>
+                          <option value="after">修改后</option><option value="before">修改前</option>
+                        </select>
+                      </label>
+                      <label>起始行号
+                        <input aria-label="本地评论起始行号" type="number" min="1" required value={commentTarget.line || ''} onChange={(event) => setCommentTarget((current) => current && ({ ...current, line: Number(event.target.value) }))} />
+                      </label>
+                    </>}
+                    {draftScope === 'range' && <label>结束行号
+                      <input aria-label="本地评论结束行号" type="number" min="1" required value={draftEndLine} onChange={(event) => setDraftEndLine(event.target.value)} />
+                    </label>}
+                    <label>评论类型
+                      <select aria-label="本地评论类型" value={draftCategory} onChange={(event) => { const category = event.target.value as CommentCategory; setDraftCategory(category); if (category !== 'suggestion') setDraftSuggestion(''); }}>
+                        {Object.entries(commentCategoryLabel).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                      </select>
+                    </label>
+                    <label>本地状态
+                      <select aria-label="本地评论解决状态" value={draftResolved ? 'resolved' : 'open'} onChange={(event) => setDraftResolved(event.target.value === 'resolved')}>
+                        <option value="open">未解决</option><option value="resolved">已解决</option>
+                      </select>
+                    </label>
+                    {draftCategory === 'suggestion' && <label className="mr-wide">修改建议代码块
+                      <textarea aria-label="本地评论修改建议代码" maxLength={5000} rows={4} value={draftSuggestion} onChange={(event) => setDraftSuggestion(event.target.value)} />
+                    </label>}
                     <label className="mr-wide">问题描述
                       <textarea ref={commentBodyRef} aria-label="本地评论问题描述" required maxLength={5000} rows={2} value={draftBody} onChange={(event) => setDraftBody(event.target.value)} />
                     </label>
@@ -2329,23 +2559,20 @@ export function App() {
                       <textarea aria-label="本地评论人工依据" required maxLength={5000} rows={2} value={draftEvidence} onChange={(event) => setDraftEvidence(event.target.value)} />
                     </label>
                     <div className="mr-actions mr-wide">
-                      <button className="secondary-button" type="submit" disabled={savingLocalComment || !fileStatesFresh || !draftBody.trim() || !draftEvidence.trim()}>{savingLocalComment ? '保存中…' : editingLocalCommentId ? '更新本地评论' : '保存本地评论'}</button>
+                      <button className="secondary-button" type="submit" disabled={savingLocalComment || !fileStatesFresh || !draftBody.trim() || !draftEvidence.trim() ||
+                        (draftScope !== 'file' && commentTarget.line < 1) || (draftScope === 'range' && (!draftEndLine || Number(draftEndLine) <= commentTarget.line))}>{savingLocalComment ? '保存中…' : editingLocalCommentId ? '更新本地评论' : '保存本地评论'}</button>
                       <button className="secondary-button" type="button" onClick={() => { setCommentTarget(null); setEditingLocalCommentId(null); setDraftBody(''); setDraftEvidence(''); }}>取消</button>
                     </div>
                   </form>}
-                  {(review.localComments ?? []).filter((item) => item.fileId === file?.id).map((comment) => <div className="mr-draft-item" key={comment.id}>
-                    <strong>{comment.path}:{comment.line} · {comment.side === 'before' ? '修改前' : '修改后'}</strong>
-                    <span>{fileStatesFresh ? '未发布 · 本地评论' : '待重核 · 旧快照评论'}</span>
+                  {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).map((comment) => <div className="mr-draft-item" key={comment.id}>
+                    <strong>{comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''} · ${comment.side === 'before' ? '修改前' : '修改后'}`}</strong>
+                    <span>{comment.anchorStatus === 'pending' ? '待重新定位' : fileStatesFresh ? '未发布 · 本地评论' : '待重核 · 旧快照评论'} · {commentCategoryLabel[comment.category ?? 'problem']} · {comment.resolved ? '已解决' : '未解决'}</span>
+                    {comment.anchorReason && <small>{comment.anchorReason}</small>}
                     <p>{comment.body}</p><p>人工依据：{comment.evidence}</p>
+                    {comment.suggestion && <pre className="comment-suggestion"><code>{comment.suggestion}</code></pre>}
                     <div className="mr-actions">
-                      <button className="secondary-button" type="button" onClick={() => { if (file) jumpTo(file, comment.side, comment.line); }}>定位</button>
-                      <button className="secondary-button" type="button" disabled={!fileStatesFresh} onClick={() => {
-                        setCommentTarget({ fileId: comment.fileId, side: comment.side, line: comment.line });
-                        setEditingLocalCommentId(comment.id);
-                        setDraftBody(comment.body);
-                        setDraftEvidence(comment.evidence);
-                        requestAnimationFrame(() => commentBodyRef.current?.focus());
-                      }}>编辑</button>
+                      <button className="secondary-button" type="button" disabled={comment.anchorStatus === 'pending'} onClick={() => { if (file) comment.scope === 'file' ? chooseFile(file.id) : jumpTo(file, comment.side, comment.line); }}>定位</button>
+                      <button className="secondary-button" type="button" disabled={!fileStatesFresh || !file} onClick={() => { if (file) beginEditLocalComment(comment, file); }}>编辑</button>
                       <button className="secondary-button" type="button" onClick={() => void deleteLocalComment(comment)}>删除</button>
                     </div>
                   </div>)}
@@ -2556,6 +2783,20 @@ export function App() {
                       </div>
                       <div className="review-core-state">
                         <span className="hunk-range" title={visibleHunks[activeHunkIndex]?.change.label ?? ''}>{visibleHunks[activeHunkIndex]?.change.label ?? '无当前变更块'}</span>
+                        <select aria-label="当前变更块审查状态" disabled={activeHunkIndex < 0 || !fileStatesFresh}
+                          value={(() => {
+                            const active = visibleHunks[activeHunkIndex];
+                            const state = active && review.hunkStates?.[active.change.id];
+                            return active && state?.fingerprint === hunkFingerprint(active.file, active.change) ? state.status : 'unread';
+                          })()}
+                          onChange={(event) => void updateHunkStatus(event.target.value as FileStatus)}>
+                          <option value="unread">{(() => {
+                            const active = visibleHunks[activeHunkIndex];
+                            return active && !review.hunkStates?.[active.change.id] && currentFileStatus(review, active.file, fileStatesFresh) === 'reviewed'
+                              ? '逐块未单独记录（文件已审查）' : '变更块未阅读';
+                          })()}</option><option value="in_progress">变更块审查中</option>
+                          <option value="question">变更块有疑问</option><option value="reviewed">变更块已审查</option>
+                        </select>
                         <select aria-label="当前文件审查状态" value={file ? currentFileStatus(review, file, fileStatesFresh) : 'unread'} disabled={!file || !fileStatesFresh}
                           onChange={(event) => void updateFileStatus(event.target.value as FileStatus)}>
                           <option value="unread">未阅读</option><option value="in_progress">审查中</option><option value="question">有疑问</option><option value="reviewed">已审查</option>
@@ -2598,13 +2839,14 @@ export function App() {
                               return next;
                             })}
                             onLine={(side, line) => chooseLine(side, line, item)}
+                            comments={commentMarkers(review, item)}
                           />
                         ))}
                       </div>
                     ) : file && !file.issue && !showWhitespaceChanges ? (
-                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} />
+                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} />
                     ) : (
-                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} />
+                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} />
                     )}
                     <div className="code-footer">
                       <span>只读源码</span>
