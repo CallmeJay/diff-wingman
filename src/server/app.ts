@@ -1,7 +1,7 @@
 import express from 'express';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import type { HunkExplanation, Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
+import type { CommitContext, HunkExplanation, Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
 import { listClaims } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { compareMrVersions, hunkFingerprint, inheritMrReview } from '../shared/incremental.js';
@@ -30,7 +30,7 @@ import {
   verificationInputSchema,
 } from '../shared/schemas.js';
 import { AppError, errorMessage } from './errors.js';
-import { createLiveSnapshot, createSnapshot, git, listRepositoryVersions, listUntracked } from './git.js';
+import { createLiveSnapshot, createSnapshot, git, listRepositoryVersions, listUntracked, readCommitContext } from './git.js';
 import { pickRepository } from './folder-picker.js';
 import { buildPrompt, guideFingerprint, mergeGuideBatches, planGuideBatches, validateAnswer, validateGuide } from './guide.js';
 import { buildHunkPrompt, planHunkBatches, validateHunkExplanations } from './hunk-explanations.js';
@@ -745,7 +745,24 @@ export function createApp(options: {
     const prompt = question && group
       ? buildPrompt(review.snapshot, { question: question.question, group })
       : hunkId ? buildHunkPrompt(review, [hunkId]) : undefined;
-    const batches = question || hunkId ? undefined : planGuideBatches(review.snapshot);
+    let commitContext: CommitContext | undefined;
+    let batches: ReturnType<typeof planGuideBatches> | undefined;
+    if (!question && !hunkId) {
+      try {
+        commitContext = await readCommitContext(review.snapshot);
+      } catch {
+        // 固定快照已保存，提交描述读取失败不应阻止基于 diff 的阅读路线。
+        commitContext = { messages: [], note: '提交描述读取失败，本次只使用固定 diff。' };
+      }
+      try {
+        batches = planGuideBatches(review.snapshot, commitContext);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.status !== 422 || !commitContext.messages.length) throw error;
+        // 提交描述是可选线索；超出上下文上限时保留原有纯 diff 导读能力并明确标记未使用。
+        commitContext = { messages: [], note: '提交描述使导读上下文超限，本次只使用固定 diff。' };
+        batches = planGuideBatches(review.snapshot, commitContext);
+      }
+    }
     if ([...tasks.values()].some((task) => task.active))
       throw new AppError(409, '已有导读任务正在执行或退出，请稍后重试。');
     // 首版单任务执行，避免重复点击和多标签页重复消耗订阅额度。
@@ -834,6 +851,7 @@ export function createApp(options: {
           task.persisting = true;
           await store.update(reviewId, (latest) => {
             latest.guide = guide;
+            latest.commitContext = commitContext;
             if (includeHunks) latest.hunkExplanations = Object.fromEntries(cards.map((card) => [card.changeId, card]));
           });
         }

@@ -26,6 +26,7 @@ import type {
   Requirement,
   RepositoryVersionOption,
   SnapshotMode,
+  CommitContext,
 } from '../shared/types.js';
 import { AppError } from './errors.js';
 import { findStaticReferences, type ChangedSymbol } from './symbols.js';
@@ -34,6 +35,36 @@ const exec = promisify(execFile);
 const FILE_LIMIT = 256 * 1024;
 const SNAPSHOT_LIMIT = 8 * 1024 * 1024;
 const codePattern = /\.[cm]?[jt]sx?$/;
+
+// 提交描述只是固定提交范围的作者意图线索；非祖先范围和未提交快照不能据此解释净 diff。
+export async function readCommitContext(snapshot: Snapshot): Promise<CommitContext> {
+  if (snapshot.mode && snapshot.mode !== 'commits')
+    return { messages: [], note: '暂存区和工作区没有本次改动对应的 commit message。' };
+  try {
+    await git(snapshot.repo, ['merge-base', '--is-ancestor', snapshot.base, snapshot.target]);
+  } catch (error) {
+    if ((error as { code?: number }).code !== 1) throw error;
+    return { messages: [], note: '基线不是目标提交的祖先，提交列表不能可靠对应当前净 diff。' };
+  }
+  const raw = (await git(snapshot.repo, [
+    'log', '-z', '--format=%H%x00%s', '--max-count=101', `${snapshot.base}..${snapshot.target}`,
+  ])).toString('utf8');
+  const tokens = raw.split('\0');
+  if (tokens.at(-1) === '') tokens.pop();
+  if (tokens.length % 2 !== 0) throw new AppError(422, '无法解析固定版本的提交描述。');
+  const messages = [];
+  let longSubject = false;
+  for (let index = 0; index < Math.min(tokens.length, 200); index += 2) {
+    const subject = tokens[index + 1];
+    longSubject ||= subject.length > 300;
+    messages.push({ oid: tokens[index], subject: subject.slice(0, 300) });
+  }
+  const notes = [
+    tokens.length > 200 ? '提交超过 100 条，只读取最近 100 条描述。' : null,
+    longSubject ? '过长的提交描述只读取前 300 个字符。' : null,
+  ].filter(Boolean);
+  return { messages, note: notes.length ? notes.join(' ') : null };
+}
 
 // Git 只读取对象，清除宿主 Git 重定向变量，避免误读另一个仓库。
 export async function git(

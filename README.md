@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.0.8-3f684c" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.0.9-3f684c" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-3f684c" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-%3E%3D20.19-3f684c" />
   <img alt="Electron" src="https://img.shields.io/badge/Electron-44-3f684c" />
@@ -28,6 +28,7 @@ Diff Wingman 是一个本地代码审查工具，适合在 AI 参与开发后梳
 | 文件浏览 | 列表/树形视图、文件展开/折叠、路径搜索和多条件筛选 |
 | Diff 阅读 | 并排/内联布局、变更块上下文折叠与展开、逐块导航、单文件阅读模式 |
 | AI 导读 | 使用 Codex 生成阅读路线、需求对照和流程步骤；生成前可选择整份逐块解释或逐块按需生成 |
+| 按功能改动总览 | 从阅读路线展开功能对应的全部文件与变更块，点击跳转并突出当前功能的 Git hunk；可用的提交描述仅作为归纳线索 |
 | 逐块理解 | 每个 hunk 的结构化解释卡、证据来源、覆盖矩阵和独立人工理解状态；“已核实”需填写依据 |
 | 影响上下文 | 为 JS、TS、JSX、TSX 变更补充函数范围、静态引用和固定提交树中的符号影响链 |
 | 人工审查 | 文件与变更块审查状态、本地评论、笔记、逐条判断、核实依据和 Markdown 审查报告 |
@@ -78,7 +79,7 @@ pnpm desktop:make
 
 1. 选择本地 Git 仓库，指定两个版本，或选择暂存区、工作区、GitLab MR。
 2. 填写本次需求和不得改变项，创建固定源码快照。
-3. 浏览文件 diff；生成前选择整份或按需逐块解释，选中完整标识符时可查看符号影响链。
+3. 浏览文件 diff；生成导读后按功能展开文件与变更块，点击可跳转并突出当前功能范围；逐块解释可整份或按需生成，选中完整标识符时可查看符号影响链。
 4. 在覆盖矩阵中检查未分析块，记录独立理解状态、逐条判断、核实依据和验证结果。
 5. 导出 Markdown 审查报告。
 
@@ -97,7 +98,7 @@ codex login
 codex login status
 ```
 
-点击生成或追问时，选中的源码上下文和需求会发送到 Codex 服务并消耗账号额度。本地读取 Git 不会调用模型，工具也不会读取或复制 Codex 的 `auth.json`。
+点击生成或追问时，选中的源码上下文和需求会发送到 Codex 服务；生成导读时还会发送可用的提交描述。这会消耗账号额度。本地读取 Git 不会调用模型，工具也不会读取或复制 Codex 的 `auth.json`。
 
 ## GitLab MR
 
@@ -118,7 +119,7 @@ export REVIEW_HELPER_GITLAB_TOKEN=your_read_only_token
 - 静态引用和 AI 解释都是审查线索，不代表运行时一定可达，最终结论由 reviewer 确认。
 - 源码快照、导读、笔记和报告保存在本机；默认目录不会提交到 Git。
 
-完整限制见[v0.0.8 范围与契约](docs/v8-scope.md)与[验收记录](docs/v8-verification.md)。
+完整限制见[v0.0.9 范围与契约](docs/v9-scope.md)与[验收记录](docs/v9-verification.md)。
 
 ## 配置
 

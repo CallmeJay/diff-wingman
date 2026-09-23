@@ -34,6 +34,7 @@ export function CodePanel({
   jump,
   onPosition,
   comments = [],
+  featureChangeIds = [],
   onSymbol,
 }: {
   file: ReviewFile | null;
@@ -45,6 +46,7 @@ export function CodePanel({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments?: CommentMarker[];
+  featureChangeIds?: string[];
   onSymbol?: (selection: SymbolPick) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -209,6 +211,28 @@ export function CodePanel({
     return () => decorations.forEach((dispose) => dispose?.());
   }, [file, markerKey]);
 
+  const featureKey = featureChangeIds.join('|');
+  useEffect(() => {
+    if (!file || !featureKey) return;
+    const selected = new Set(featureChangeIds);
+    const clear = (['before', 'after'] as const).map((side) => {
+      const editor = editors.current[side];
+      const lineCount = editor?.getModel()?.getLineCount() ?? 0;
+      if (!editor || !lineCount) return null;
+      const decorations = file.changes.filter((change) => selected.has(change.id)).flatMap((change) => {
+        const start = side === 'before' ? change.oldStart : change.newStart;
+        const count = side === 'before' ? change.oldLines : change.newLines;
+        if (!count || start > lineCount) return [];
+        return [{ range: new monaco.Range(start, 1, Math.min(start + count - 1, lineCount), 1),
+          options: { isWholeLine: true, className: 'feature-hunk-line',
+            linesDecorationsClassName: 'feature-hunk-gutter' } }];
+      });
+      const ids = editor.deltaDecorations([], decorations);
+      return () => editor.deltaDecorations(ids, []);
+    });
+    return () => clear.forEach((dispose) => dispose?.());
+  }, [file, featureKey]);
+
   if (file?.issue)
     return (
       <div className="code-unavailable">
@@ -233,6 +257,7 @@ export function StaticDiffPanel({
   jump,
   onPosition,
   comments = [],
+  featureChangeIds = [],
   onSymbol,
 }: {
   file: ReviewFile;
@@ -244,6 +269,7 @@ export function StaticDiffPanel({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments?: CommentMarker[];
+  featureChangeIds?: string[];
   onSymbol?: (selection: SymbolPick) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -254,6 +280,7 @@ export function StaticDiffPanel({
     () => buildDiffBlocks(file.before ?? '', file.after ?? '', showWhitespaceChanges),
     [file, showWhitespaceChanges],
   );
+  const focused = new Set(featureChangeIds);
 
   useEffect(() => {
     if (!activeRef) return;
@@ -280,9 +307,15 @@ export function StaticDiffPanel({
   const renderLine = (side: Side, line: DiffLine | undefined, changed: boolean) => {
     if (!line) return <div className="static-diff-line empty" />;
     const markers = comments.filter((item) => item.side === side && item.line === line.number);
+    const inFeature = file.changes.some((change) => {
+      if (!focused.has(change.id)) return false;
+      const start = side === 'before' ? change.oldStart : change.newStart;
+      const count = side === 'before' ? change.oldLines : change.newLines;
+      return count > 0 && line.number >= start && line.number < start + count;
+    });
     return <button
         type="button"
-        className={`static-diff-line${changed ? side === 'before' ? ' removed' : ' added' : ''}`}
+        className={`static-diff-line${changed ? side === 'before' ? ' removed' : ' added' : ''}${inFeature ? ' feature-hunk-line' : ''}`}
         aria-label={`${side === 'before' ? '修改前' : '修改后'}第 ${line.number} 行`}
         aria-current={activeRef?.side === side && line.number >= activeRef.startLine && line.number <= activeRef.endLine ? 'location' : undefined}
         data-side={side}
@@ -338,7 +371,7 @@ export function StaticDiffPanel({
       const first = change && !renderedHunks.has(change.id);
       if (change) renderedHunks.add(change.id);
       return <div key={blockIndex} data-hunk-id={first ? change.id : undefined}>
-        {first && <div className="static-diff-hunk">{change.label}</div>}
+        {first && <div className={`static-diff-hunk${focused.has(change.id) ? ' feature-hunk' : ''}`}>{change.label}</div>}
         {renderRows(block, blockIndex, 0, count)}
       </div>;
     }
@@ -381,7 +414,7 @@ export function StaticDiffPanel({
       parts.push(renderGap(cursor, window.start, index));
       if (!renderedHunks.has(window.item.id)) {
         renderedHunks.add(window.item.id);
-        parts.push(<div key={`hunk-${window.item.id}`} className="static-diff-hunk" data-hunk-id={window.item.id}>{window.item.label}</div>);
+        parts.push(<div key={`hunk-${window.item.id}`} className={`static-diff-hunk${focused.has(window.item.id) ? ' feature-hunk' : ''}`} data-hunk-id={window.item.id}>{window.item.label}</div>);
       }
       parts.push(renderRows(block, blockIndex, window.start, window.end));
       cursor = window.end;

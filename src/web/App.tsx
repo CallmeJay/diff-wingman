@@ -5,6 +5,7 @@ import type {
   CodexStatus,
   CommentDraft,
   CommentCategory,
+  Change,
   LocalComment,
   ReadingPosition,
   ReviewSummary,
@@ -25,6 +26,7 @@ import type {
 import { listClaims, type ReviewClaim } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { hunkFingerprint } from '../shared/incremental.js';
+import { featureFiles } from '../shared/feature-overview.js';
 import { api } from './api.js';
 import { CodePanel, StaticDiffPanel, type CommentMarker, type DiffJump, type SymbolPick } from './CodePanel.js';
 import { V8ReviewPanel } from './V8ReviewPanel.js';
@@ -653,6 +655,7 @@ function FileDiffCard({
   jump,
   onPosition,
   comments,
+  featureChangeIds,
   onSymbol,
 }: {
   file: ReviewFile;
@@ -669,6 +672,7 @@ function FileDiffCard({
   jump: DiffJump | null;
   onPosition: (side: Side, line: number) => void;
   comments: CommentMarker[];
+  featureChangeIds: string[];
   onSymbol?: (selection: SymbolPick) => void;
 }) {
   const card = useRef<HTMLElement>(null);
@@ -699,9 +703,9 @@ function FileDiffCard({
           )}
           {visible ? (
             file.issue ? (
-              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} onSymbol={onSymbol} />
+              <CodePanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} featureChangeIds={featureChangeIds} onSymbol={onSymbol} />
             ) : (
-              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} onSymbol={onSymbol} />
+              <StaticDiffPanel file={file} activeRef={activeRef} onLine={onLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={onPosition} comments={comments} featureChangeIds={featureChangeIds} onSymbol={onSymbol} />
             )
           ) : (
             <div className="file-diff-placeholder" aria-hidden="true" />
@@ -975,6 +979,7 @@ export function App() {
   useEffect(() => {
     // 文件 id 在每个快照内从 file-1 重新编号，切换快照时不能沿用折叠状态。
     setCollapsedFiles(new Set());
+    setSelectedGroup(0);
   }, [snapshot?.id]);
   const file = snapshot?.files.find((item) => item.id === selectedFile) ?? null;
   const fileStatesFresh = freshness?.fresh === true || Boolean(review && !review.gitlab && (!snapshot?.mode || snapshot.mode === 'commits'));
@@ -983,6 +988,7 @@ export function App() {
   const visibleHunks = visibleFiles.flatMap((item) => item.changes.filter((change) => change.id.includes(':hunk-')).map((change) => ({ file: item, change })));
   const activeHunkIndex = visibleHunks.findIndex(({ change }) => change.id === readingPosition?.changeId);
   const group = review?.guide?.groups[selectedGroup];
+  const focusedChangeIds = navigation === 'guide' ? group?.changeIds ?? [] : [];
   const busy = requesting || task?.state === 'running';
   const changes = snapshot?.files.flatMap((item) => item.changes) ?? [];
   const claims = review?.guide ? listClaims(review.guide) : [];
@@ -1645,6 +1651,12 @@ export function App() {
     setJump({ side, line, token: ++jumpCounter.current });
     setNoteFeedback('');
   }
+  // 功能导航落到该功能的具体变更块；元数据变更没有可定位的文本行，只选择文件。
+  function jumpToChange(sourceFile: ReviewFile, change: Change) {
+    if (change.newLines > 0) jumpTo(sourceFile, 'after', change.newStart);
+    else if (change.oldLines > 0) jumpTo(sourceFile, 'before', change.oldStart);
+    else chooseFile(sourceFile.id);
+  }
   function firstPosition(sourceFile: ReviewFile): { side: Side; line: number } | null {
     const first = sourceFile.changes.find((item) => item.id.includes(':hunk-'));
     if (first && first.newLines > 0) return { side: 'after', line: first.newStart };
@@ -1695,7 +1707,7 @@ export function App() {
     );
     if (firstChange) {
       const sourceFile = snapshot?.files.find((item) => item.id === firstChange.fileId);
-      if (sourceFile) jumpTo(sourceFile, firstChange.newLines ? 'after' : 'before', firstChange.newLines ? firstChange.newStart : firstChange.oldStart);
+      if (sourceFile) jumpToChange(sourceFile, firstChange);
     }
     setNoteFeedback('');
   }
@@ -1719,14 +1731,25 @@ export function App() {
         line >= item.startLine &&
         line <= item.endLine,
     );
+    // 同文件跨功能时优先按实际 hunk 归属切换；宽范围源码引用可能同时覆盖多个 hunk。
+    const changedHunk = sourceFile.changes.find((change) => {
+      const start = side === 'before' ? change.oldStart : change.newStart;
+      const count = side === 'before' ? change.oldLines : change.newLines;
+      return change.id.includes(':hunk-') && count > 0 && line >= start && line < start + count;
+    });
+    if (changedHunk && review?.guide) {
+      setSelectedGroup(review.guide.groups.findIndex((item) => item.changeIds.includes(changedHunk.id)));
+    }
     if (ref) {
       setActiveRef(ref);
-      const index = review?.guide?.groups.findIndex((group) =>
-        group.changeIds.some((id) =>
-          sourceFile.changes.some((change) => change.id === id && change.refIds.includes(ref.id)),
-        ),
-      );
-      if (index !== undefined && index >= 0) setSelectedGroup(index);
+      if (!changedHunk) {
+        const index = review?.guide?.groups.findIndex((group) =>
+          group.changeIds.some((id) =>
+            sourceFile.changes.some((change) => change.id === id && change.refIds.includes(ref.id)),
+          ),
+        );
+        if (index !== undefined && index >= 0) setSelectedGroup(index);
+      }
     }
   }
 
@@ -1902,7 +1925,7 @@ export function App() {
           <span>
             Diff<span className="brand-light"> Wingman</span>
           </span>
-          <span className="version-tag">v0.0.8</span>
+          <span className="version-tag">v0.0.9</span>
         </a>
         <div className="header-status">
           <span className="local-tag">LOCAL WORKSPACE</span>
@@ -2752,7 +2775,7 @@ export function App() {
                       <div className="file-review-counts">{freshness === null && (review.gitlab || snapshot.mode && snapshot.mode !== 'commits') ? '源码状态校验中…' : `已审查 ${statusCounts.reviewed} · 有疑问 ${statusCounts.question} · 未审查 ${statusCounts.unreviewed}`}</div>
                       <button type="button" className="next-unreviewed" onClick={nextUnreviewedFile} disabled={!visibleFiles.some((item) => ['unread', 'in_progress'].includes(currentFileStatus(review, item, fileStatesFresh)))}>下一个未审查文件</button>
                     </div>}
-                    <div className={`nav-content${navigation === 'files' && fileView === 'tree' ? ' tree-mode' : ''}`}>
+                    <div className={`nav-content${navigation === 'files' && fileView === 'tree' ? ' tree-mode' : ''}${navigation === 'guide' ? ' guide-mode' : ''}`}>
                       {navigation === 'files' ? (
                         visibleFiles.length === 0 ? <p className="muted small">没有符合条件的文件。</p> : fileView === 'list' ? (
                           visibleFiles.map((item) => (
@@ -2778,35 +2801,46 @@ export function App() {
                         )
                       ) : review.guide ? (
                         <>
-                          <p className="nav-caption">按业务顺序阅读</p>
-                          {review.guide.groups.map((item, index) => (
-                            <button
-                              key={index}
-                              className={`group-item ${selectedGroup === index ? 'active' : ''}`}
-                              onClick={() => chooseGroup(index)}
-                            >
-                              <span>{String(index + 1).padStart(2, '0')}</span>
-                              <div>
-                                <strong>{item.title}</strong>
-                                <small>
-                                  {item.changeIds.length} 处变更 · {groupStatusLabel(index)}
-                                </small>
-                              </div>
-                            </button>
-                          ))}
+                          <p className="nav-caption">{review.commitContext ? '按功能查看 · 点击后列出文件和变更块' : '旧版阅读分组 · 重新生成后按功能整理'}</p>
+                          {review.guide.groups.map((item, index) => {
+                            const files = featureFiles(snapshot, item);
+                            return <div className="feature-nav-entry" key={index}>
+                              <button
+                                className={`group-item ${selectedGroup === index ? 'active' : ''}`}
+                                aria-expanded={selectedGroup === index}
+                                onClick={() => chooseGroup(index)}
+                              >
+                                <span>{String(index + 1).padStart(2, '0')}</span>
+                                <div>
+                                  <strong>{item.title}</strong>
+                                  <small>{files.length} 个文件 · {item.changeIds.length} 处变更 · {groupStatusLabel(index)}</small>
+                                </div>
+                              </button>
+                              {selectedGroup === index && <div className="feature-file-list" aria-label={`${item.title}对应的文件改动`}>
+                                {files.map(({ file: sourceFile, changes: fileChanges }) => <div className="feature-file" key={sourceFile.id}>
+                                  <button type="button" className="feature-file-name"
+                                    onClick={() => jumpToChange(sourceFile, fileChanges[0])} title={sourceFile.path}>
+                                    {sourceFile.path} <small>{fileChanges.length} 处</small>
+                                  </button>
+                                  {fileChanges.map((change) => <button type="button" className="feature-change"
+                                    key={change.id} onClick={() => jumpToChange(sourceFile, change)}>
+                                    {change.label}
+                                  </button>)}
+                                </div>)}
+                              </div>}
+                            </div>;
+                          })}
                           {review.guide.unreviewed.length > 0 && (
                             <div className="unreviewed">
-                              <strong>未分析 · {review.guide.unreviewed.length}</strong>
-                              {review.guide.unreviewed.map((item) => (
-                                <p key={item.changeId}>
-                                  {
-                                    snapshot.files.find((file) =>
-                                      file.changes.some((change) => change.id === item.changeId),
-                                    )?.path
-                                  }
-                                  ：{item.reason}
-                                </p>
-                              ))}
+                              <strong>未分析／待核对 · {review.guide.unreviewed.length}</strong>
+                              {review.guide.unreviewed.map((item) => {
+                                const sourceFile = snapshot.files.find((file) => file.changes.some((change) => change.id === item.changeId));
+                                const change = sourceFile?.changes.find((entry) => entry.id === item.changeId);
+                                return <button type="button" className="unreviewed-change" key={item.changeId}
+                                  onClick={() => { setSelectedGroup(-1); if (sourceFile && change) jumpToChange(sourceFile, change); }}>
+                                  {sourceFile?.path} · {change?.label}：{item.reason}
+                                </button>;
+                              })}
                             </div>
                           )}
                         </>
@@ -2872,6 +2906,7 @@ export function App() {
                       </details>
                     </div>
                     <div className="review-core-toolbar">
+                      {navigation === 'guide' && group && <span className="feature-focus-label">已选功能：{group.title} · {group.changeIds.some((id) => id.includes(':hunk-')) ? '所属变更块以紫色边框标出' : '只有元数据变更，无文本高亮'}</span>}
                       <div className="review-core-navigation">
                         <button type="button" onClick={() => navigateFile(-1)} disabled={!visibleFiles.length} title="上一个文件 · Alt+↑">上一文件</button>
                         <button type="button" onClick={() => navigateFile(1)} disabled={!visibleFiles.length} title="下一个文件 · Alt+↓">下一文件</button>
@@ -2949,14 +2984,15 @@ export function App() {
                             })}
                             onLine={(side, line) => chooseLine(side, line, item)}
                             comments={commentMarkers(review, item)}
+                            featureChangeIds={focusedChangeIds}
                             onSymbol={setSymbolPick}
                           />
                         ))}
                       </div>
                     ) : file && !file.issue && !showWhitespaceChanges ? (
-                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} onSymbol={setSymbolPick} />
+                      <StaticDiffPanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => recordScrollPosition(file, side, line)} comments={commentMarkers(review, file)} featureChangeIds={focusedChangeIds} onSymbol={setSymbolPick} />
                     ) : (
-                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} onSymbol={setSymbolPick} />
+                      <CodePanel file={file} activeRef={activeRef} onLine={chooseLine} diffLayout={diffLayout} showWhitespaceChanges={showWhitespaceChanges} showFullFile={showFullFile} jump={jump} onPosition={(side, line) => { if (file) recordScrollPosition(file, side, line); }} comments={file ? commentMarkers(review, file) : []} featureChangeIds={focusedChangeIds} onSymbol={setSymbolPick} />
                     )}
                     <div className="code-footer">
                       <span>只读源码</span>
@@ -3032,6 +3068,15 @@ export function App() {
                       {review.guide ? (
                         <>
                           <p className="guide-overview">{review.guide.overview}</p>
+                          <div className="feature-overview-counts">
+                            {review.guide.groups.length} 个{review.commitContext ? '功能或变更主题' : '阅读分组'} · 已归类 {review.guide.groups.reduce((count, item) => count + item.changeIds.length, 0)}/{changes.length} 处变更
+                            {review.guide.unreviewed.length > 0 && ` · 待人工核对 ${review.guide.unreviewed.length} 处`}
+                          </div>
+                          {review.commitContext && <details className="commit-context">
+                            <summary>参考提交描述 · {review.commitContext.messages.length} 条（仅作为作者意图线索）</summary>
+                            {review.commitContext.note && <p>{review.commitContext.note}</p>}
+                            {review.commitContext.messages.map((item) => <p key={item.oid}><code>{short(item.oid)}</code> {item.subject || '（空提交描述）'}</p>)}
+                          </details>}
                           {(snapshot.requirements?.length ?? 0) > 0 && (
                             <section className="detail-section requirement-section">
                               <h3>需求对照</h3>

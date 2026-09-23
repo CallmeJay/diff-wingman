@@ -102,6 +102,11 @@ export interface Guide {
   }[];
 }
 
+export interface CommitContext {
+  messages: { oid: string; subject: string }[];
+  note: string | null;
+}
+
 export interface GroupReviewState {
   status: 'understood' | 'question' | 'verified';
   evidence: string;
@@ -254,6 +259,7 @@ export interface Answer {
 
 export interface SavedReview {
   snapshot: Snapshot;
+  commitContext?: CommitContext;
   gitlab?: GitLabMergeRequest;
   commentDrafts?: CommentDraft[];
   localComments?: LocalComment[];

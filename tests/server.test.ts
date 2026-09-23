@@ -112,6 +112,7 @@ test('HTTP 端到端：来源保护、真实快照、导读持久化、取消和
   assert.equal(start.status, 202);
   const task = (await start.json()) as TaskStatus;
   assert.ok(invocation!.options.prompt.includes(snapshot.target));
+  assert.match(invocation!.options.prompt, /Restore pending state after failed requests/);
   assert.equal((await request(`/api/reviews/${snapshot.id}/guide`, 'POST')).status, 409);
   assert.equal(
     (
@@ -137,6 +138,7 @@ test('HTTP 端到端：来源保护、真实快照、导读持久化、取消和
   const saved = await store.get(snapshot.id);
   assert.equal(saved.notes.overview, '已核对异常传播');
   assert.equal(saved.guide?.groups[0].after.text, statement.text);
+  assert.deepEqual(saved.commitContext?.messages.map((item) => item.subject), ['Restore pending state after failed requests']);
   const next = (await request(`/api/reviews/${snapshot.id}/guide`, 'POST').then((response) =>
     response.json(),
   )) as TaskStatus;
