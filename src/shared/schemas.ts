@@ -54,13 +54,6 @@ export const guideSchema = z
   })
   .strict();
 
-export const answerSchema = z
-  .object({
-    statements: z.array(statementSchema).min(1).max(30),
-    openQuestions: z.array(z.string().min(1).max(2000)).max(20),
-  })
-  .strict();
-
 export const snapshotInputSchema = z
   .object({
     repo: z.string().min(1).max(4096),
@@ -113,15 +106,6 @@ export const commentDraftEditSchema = z
   })
   .strict();
 
-export const reviewStateInputSchema = z
-  .object({
-    groupIndex: z.number().int().nonnegative(),
-    guideHash: z.string().regex(/^[a-f0-9]{64}$/),
-    status: z.enum(['unread', 'understood', 'question', 'verified']),
-    evidence: z.string().max(5000),
-  })
-  .strict();
-
 export const claimStateInputSchema = z
   .object({
     key: z.string().min(1).max(100),
@@ -129,17 +113,6 @@ export const claimStateInputSchema = z
     status: z.enum(['unread', 'confirmed', 'question', 'rejected']),
     evidence: z.string().max(5000),
   })
-  .strict();
-
-export const questionInputSchema = z
-  .object({
-    groupIndex: z.number().int().nonnegative(),
-    question: z.string().min(1).max(4000),
-  })
-  .strict();
-
-export const noteInputSchema = z
-  .object({ key: z.string().min(1).max(100), text: z.string().max(20_000) })
   .strict();
 
 export const fileStateInputSchema = z.object({
@@ -230,13 +203,3 @@ export const localCommentEditSchema = commentDraftEditSchema.omit({ path: true }
   fileId: z.string().min(1).max(100).optional(),
   fingerprint: z.string().min(1).max(10000).optional(),
 });
-
-export const verificationInputSchema = z
-  .object({
-    caseId: z.string().min(1).max(100),
-    scriptName: z.string().min(1).max(80),
-    trigger: z.string().min(1).max(2000),
-    expected: z.string().min(1).max(2000),
-    guideFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  })
-  .strict();

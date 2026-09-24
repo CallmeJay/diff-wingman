@@ -1,12 +1,11 @@
 import express from 'express';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
-import type { CommitContext, HunkExplanation, Requirement, ReviewFile, SavedReview, TaskStatus, VerificationTaskStatus } from '../shared/types.js';
+import type { CommitContext, HunkExplanation, Requirement, ReviewFile, SavedReview, TaskStatus } from '../shared/types.js';
 import { listClaims } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
 import { compareMrVersions, hunkFingerprint, inheritMrReview } from '../shared/incremental.js';
 import {
-  answerSchema,
   claimStateInputSchema,
   commentDraftEditSchema,
   commentDraftInputSchema,
@@ -20,19 +19,15 @@ import {
   guideSchema,
   localCommentInputSchema,
   localCommentEditSchema,
-  noteInputSchema,
-  questionInputSchema,
   readingPositionInputSchema,
-  reviewStateInputSchema,
   snapshotInputSchema,
   symbolImpactInputSchema,
   symbolSourceInputSchema,
-  verificationInputSchema,
 } from '../shared/schemas.js';
 import { AppError, errorMessage } from './errors.js';
 import { createLiveSnapshot, createSnapshot, git, listRepositoryVersions, listUntracked, readCommitContext } from './git.js';
 import { pickRepository } from './folder-picker.js';
-import { buildPrompt, guideFingerprint, mergeGuideBatches, planGuideBatches, validateAnswer, validateGuide } from './guide.js';
+import { guideFingerprint, mergeGuideBatches, planGuideBatches, validateGuide } from './guide.js';
 import { buildHunkPrompt, planHunkBatches, validateHunkExplanations } from './hunk-explanations.js';
 import { buildSymbolImpact, readImpactSource } from './symbol-impact.js';
 import { CodexProvider, getCodexStatus, type GuideProvider } from './codex.js';
@@ -44,13 +39,6 @@ import {
   GitLabClient,
   type GitLabReader,
 } from './gitlab.js';
-import {
-  DockerVerifier,
-  verificationCases,
-  verificationScripts,
-  type VerificationRunner,
-} from './verification.js';
-
 interface Task extends TaskStatus {
   controller: AbortController;
   persisting: boolean;
@@ -61,21 +49,16 @@ export function createApp(options: {
   store: ReviewStore;
   provider?: GuideProvider;
   status?: typeof getCodexStatus;
-  verifier?: VerificationRunner;
   gitlab?: GitLabReader;
   repositoryPicker?: () => Promise<string | null>;
 }) {
   const app = express();
   const token = randomBytes(32).toString('hex');
   const tasks = new Map<string, Task>();
-  const verificationTasks = new Map<
-    string,
-    VerificationTaskStatus & { controller: AbortController }
-  >();
+  const deletingReviews = new Set<string>();
   const provider = options.provider ?? new CodexProvider();
   const status = options.status ?? getCodexStatus;
   const store = options.store;
-  const verifier = options.verifier ?? new DockerVerifier();
   const gitlab = options.gitlab ?? new GitLabClient();
   const id = (value: unknown) =>
     z
@@ -169,6 +152,20 @@ export function createApp(options: {
   });
   app.get('/api/reviews', async (_req, res) => res.json(await store.list()));
   app.get('/api/reviews/:id', async (req, res) => res.json(await store.get(id(req.params.id))));
+  app.delete('/api/reviews/:id', async (req, res) => {
+    const reviewId = id(req.params.id);
+    if (deletingReviews.has(reviewId) ||
+      [...tasks.values()].some((task) => task.reviewId === reviewId && task.active))
+      throw new AppError(409, '此快照仍有任务在运行，请等待任务结束后再删除。');
+    // 删除期间阻止同一快照启动新任务；源码仓库和 GitLab 不受影响。
+    deletingReviews.add(reviewId);
+    try {
+      await store.delete(reviewId);
+      res.json({ deleted: reviewId });
+    } finally {
+      deletingReviews.delete(reviewId);
+    }
+  });
   app.post('/api/reviews/:id/symbol-impact', async (req, res) => {
     const review = await store.get(id(req.params.id));
     res.json(await buildSymbolImpact(review, symbolImpactInputSchema.parse(req.body)));
@@ -230,7 +227,7 @@ export function createApp(options: {
       if (!previous.gitlab || previous.gitlab.url !== binding.url ||
           previous.snapshot.repo !== snapshot.repo || previous.gitlab.versionId >= binding.versionId)
         throw new AppError(400, '增量基线必须是同一仓库、同一 MR 的较早版本。');
-      const candidate: SavedReview = { snapshot, gitlab: binding, guide: null, notes: {}, answers: [] };
+      const candidate: SavedReview = { snapshot, gitlab: binding, guide: null };
       comparison = compareMrVersions(previous, candidate);
       inheritMrReview(previous, candidate, comparison);
       if ((candidate.commentDrafts?.length ?? 0) > 100 || (candidate.localComments?.length ?? 0) > 100)
@@ -398,86 +395,6 @@ export function createApp(options: {
     });
     res.json(await store.get(reviewId));
   });
-  app.get('/api/reviews/:id/verification-options', async (req, res) => {
-    const review = await store.get(id(req.params.id));
-    if (!review.guide) throw new AppError(400, '请先生成导读。');
-    const commits = !review.snapshot.mode || review.snapshot.mode === 'commits';
-    const [scripts, runtime] = commits
-      ? await Promise.all([verificationScripts(review.snapshot), verifier.availability()])
-      : [[], { available: false, reason: '第四版目前只支持两个 commit 的快照。', imageId: '' }];
-    res.json({
-      available: runtime.available,
-      reason: runtime.reason,
-      image: process.env.REVIEW_HELPER_VERIFY_IMAGE ?? 'node:22-alpine',
-      scripts,
-      cases: verificationCases(review),
-    });
-  });
-  app.post('/api/reviews/:id/verifications', async (req, res) => {
-    const reviewId = id(req.params.id);
-    const input = verificationInputSchema.parse(req.body);
-    const review = await store.get(reviewId);
-    if (!review.guide || review.guideFingerprint !== input.guideFingerprint)
-      throw new AppError(409, '导读已变化，请刷新验证清单。');
-    if (review.snapshot.mode && review.snapshot.mode !== 'commits')
-      throw new AppError(400, '第四版目前只支持两个 commit 的固定快照。');
-    if (!/\S/.test(input.trigger) || !/\S/.test(input.expected))
-      throw new AppError(400, '请填写触发条件和预期可观察结果。');
-    const check = verificationCases(review).find((item) => item.id === input.caseId);
-    const script = (await verificationScripts(review.snapshot)).find(
-      (item) => item.name === input.scriptName,
-    );
-    if (!check || !script) throw new AppError(400, '验证对象或脚本不属于当前快照。');
-    const runtime = await verifier.availability();
-    if (!runtime.available) throw new AppError(503, runtime.reason);
-    if ([...verificationTasks.values()].some((task) => task.state === 'running'))
-      throw new AppError(409, '已有隔离验证正在运行，请等待完成。');
-    const task: VerificationTaskStatus & { controller: AbortController } = {
-      id: randomUUID(),
-      reviewId,
-      state: 'running',
-      error: null,
-      recordId: null,
-      controller: new AbortController(),
-    };
-    verificationTasks.set(task.id, task);
-    // 只在用户提交明确检查项后执行；结果作为运行证据保存，不自动修改人工判断。
-    void (async () => {
-      try {
-        const evidence = await verifier.run(review.snapshot, script.name, task.controller.signal);
-        const recordId = randomUUID();
-        await store.update(reviewId, (latest) => {
-          latest.verificationRecords ??= [];
-          latest.verificationRecords.push({
-            id: recordId,
-            caseId: check.id,
-            caseTitle: check.title,
-            trigger: input.trigger,
-            expected: input.expected,
-            scriptName: script.name,
-            scriptBody: script.body,
-            snapshotId: review.snapshot.id,
-            target: review.snapshot.target,
-            guideFingerprint: input.guideFingerprint,
-            ...evidence,
-          });
-        });
-        task.recordId = recordId;
-        task.state = 'completed';
-      } catch (error) {
-        task.state = 'failed';
-        task.error = errorMessage(error);
-      }
-    })();
-    const { controller: _controller, ...publicTask } = task;
-    res.status(202).json(publicTask);
-  });
-  app.get('/api/verifications/:id', (req, res) => {
-    const task = verificationTasks.get(String(req.params.id));
-    if (!task) throw new AppError(404, '未找到验证任务。');
-    const { controller: _controller, ...publicTask } = task;
-    res.json(publicTask);
-  });
   app.put('/api/reviews/:id/claims', async (req, res) => {
     const reviewId = id(req.params.id);
     const input = claimStateInputSchema.parse(req.body);
@@ -511,56 +428,6 @@ export function createApp(options: {
     });
     res.json(await store.get(reviewId));
   });
-  app.put('/api/reviews/:id/states', async (req, res) => {
-    const reviewId = id(req.params.id);
-    const input = reviewStateInputSchema.parse(req.body);
-    if (input.status === 'verified' && !/\S/.test(input.evidence))
-      throw new AppError(400, '标记已核实前，请填写人工核实依据。');
-    const current = await store.get(reviewId);
-    if (input.status === 'verified' && current.gitlab && !(await isFresh(reviewId)))
-      throw new AppError(409, 'MR 版本已变化，请重新导入后核对人工结论。');
-    if (
-      input.status === 'verified' &&
-      current.snapshot.mode &&
-      current.snapshot.mode !== 'commits'
-    ) {
-      const fresh = await createLiveSnapshot(
-        current.snapshot.repo,
-        current.snapshot.mode,
-        current.snapshot.untracked,
-        current.snapshot.requirements,
-      );
-      if (fresh.id !== reviewId) throw new AppError(409, '源码已变化，请创建新快照后再确认。');
-    }
-    await store.update(reviewId, (review) => {
-      if (!review.guide || review.groupHashes?.[input.groupIndex] !== input.guideHash)
-        throw new AppError(409, '导读分组已变化，请重新打开快照。');
-      review.reviewStates ??= {};
-      if (input.status === 'unread') delete review.reviewStates[input.guideHash];
-      else
-        review.reviewStates[input.guideHash] = {
-          status: input.status,
-          evidence: input.evidence,
-          guideHash: input.guideHash,
-          updatedAt: new Date().toISOString(),
-        };
-    });
-    res.json(await store.get(reviewId));
-  });
-  app.put('/api/reviews/:id/notes', async (req, res) => {
-    const reviewId = id(req.params.id);
-    const input = noteInputSchema.parse(req.body);
-    await store.update(reviewId, (review) => {
-      if (
-        input.key !== 'overview' &&
-        !review.snapshot.files.some((file) => input.key === `file:${file.id}`)
-      )
-        throw new AppError(400, '笔记目标不属于当前快照。');
-      review.notes[input.key] = input.text;
-    });
-    res.json({ saved: true });
-  });
-
   app.put('/api/reviews/:id/file-states', async (req, res) => {
     const reviewId = id(req.params.id);
     const input = fileStateInputSchema.parse(req.body);
@@ -733,21 +600,17 @@ export function createApp(options: {
 
   async function startTask(
     reviewId: string,
-    question?: z.infer<typeof questionInputSchema>,
     hunkId?: string,
     includeHunks = false,
   ): Promise<TaskStatus> {
+    if (deletingReviews.has(reviewId)) throw new AppError(409, '此快照正在删除，请稍后重试。');
     const review = await store.get(reviewId);
-    const group = question ? review.guide?.groups[question.groupIndex] : undefined;
-    if (question && !group) throw new AppError(400, '请先选择已有的导读分组。');
     if (hunkId && !review.guideFingerprint) throw new AppError(400, '请先生成阅读路线。');
     if (!review.snapshot.files.length) throw new AppError(400, '这两个版本之间没有变更。');
-    const prompt = question && group
-      ? buildPrompt(review.snapshot, { question: question.question, group })
-      : hunkId ? buildHunkPrompt(review, [hunkId]) : undefined;
+    const prompt = hunkId ? buildHunkPrompt(review, [hunkId]) : undefined;
     let commitContext: CommitContext | undefined;
     let batches: ReturnType<typeof planGuideBatches> | undefined;
-    if (!question && !hunkId) {
+    if (!hunkId) {
       try {
         commitContext = await readCommitContext(review.snapshot);
       } catch {
@@ -763,13 +626,14 @@ export function createApp(options: {
         batches = planGuideBatches(review.snapshot, commitContext);
       }
     }
+    if (deletingReviews.has(reviewId)) throw new AppError(409, '此快照正在删除，请稍后重试。');
     if ([...tasks.values()].some((task) => task.active))
       throw new AppError(409, '已有导读任务正在执行或退出，请稍后重试。');
     // 首版单任务执行，避免重复点击和多标签页重复消耗订阅额度。
     const task: Task = {
       id: randomUUID(),
       reviewId,
-      kind: question ? 'question' : hunkId ? 'hunk' : 'guide',
+      kind: hunkId ? 'hunk' : 'guide',
       state: 'running',
       progress: ['正在检查 Codex 登录…'],
       error: null,
@@ -787,26 +651,7 @@ export function createApp(options: {
         const onProgress = (message: string) => {
           task.progress = [...task.progress.slice(-19), message];
         };
-        if (question && group) {
-          const raw = await provider.generate({
-            prompt: prompt!,
-            schema: answerSchema,
-            signal: task.controller.signal,
-            onProgress,
-          });
-          if (task.controller.signal.aborted) return;
-          const answer = validateAnswer(raw, review.snapshot);
-          task.persisting = true;
-          await store.update(reviewId, (latest) => {
-            latest.answers.push({
-              question: question.question,
-              groupIndex: question.groupIndex,
-              groupTitle: group.title,
-              answer,
-              createdAt: new Date().toISOString(),
-            });
-          });
-        } else if (hunkId) {
+        if (hunkId) {
           const raw = await provider.generate({ prompt: prompt!, schema: hunkExplanationBatchSchema,
             signal: task.controller.signal, onProgress });
           if (task.controller.signal.aborted) return;
@@ -875,14 +720,11 @@ export function createApp(options: {
 
   app.post('/api/reviews/:id/guide', async (req, res) => {
     const input = guideGenerationInputSchema.parse(req.body ?? {});
-    res.status(202).json(await startTask(id(req.params.id), undefined, undefined, input.hunkMode === 'all'));
+    res.status(202).json(await startTask(id(req.params.id), undefined, input.hunkMode === 'all'));
   });
-  app.post('/api/reviews/:id/questions', async (req, res) =>
-    res.status(202).json(await startTask(id(req.params.id), questionInputSchema.parse(req.body))),
-  );
   app.post('/api/reviews/:id/hunk-explanations', async (req, res) => {
     const input = hunkGenerationInputSchema.parse(req.body);
-    res.status(202).json(await startTask(id(req.params.id), undefined, input.changeId));
+    res.status(202).json(await startTask(id(req.params.id), input.changeId));
   });
   app.get('/api/tasks', (_req, res) =>
     res.json([...tasks.values()].filter((task) => task.state === 'running').map(publicTask)),
@@ -926,8 +768,6 @@ export function createApp(options: {
     app,
     stop: () => {
       for (const task of tasks.values()) if (task.state === 'running') task.controller.abort();
-      for (const task of verificationTasks.values())
-        if (task.state === 'running') task.controller.abort();
     },
   };
 }

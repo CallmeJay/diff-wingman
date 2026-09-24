@@ -51,10 +51,6 @@ test('真实 Git 快照将静态引用绑定到变更，且不修改被审查仓
     ...snapshot,
     refs: legacyRefs,
   });
-  await store.update(snapshot.id, (review) => {
-    review.notes.overview = '旧版人工笔记';
-  });
   const enriched = await store.create(snapshot);
   assert.ok(enriched.snapshot.refs.some((ref) => ref.id === reference.id));
-  assert.equal(enriched.notes.overview, '旧版人工笔记');
 });

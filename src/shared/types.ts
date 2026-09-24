@@ -107,13 +107,6 @@ export interface CommitContext {
   note: string | null;
 }
 
-export interface GroupReviewState {
-  status: 'understood' | 'question' | 'verified';
-  evidence: string;
-  guideHash: string;
-  updatedAt: string;
-}
-
 export interface ClaimReviewState {
   status: 'confirmed' | 'question' | 'rejected';
   evidence: string;
@@ -252,11 +245,6 @@ export interface LocalComment {
 
 export type CommentCategory = 'problem' | 'blocking' | 'suggestion' | 'detail';
 
-export interface Answer {
-  statements: Statement[];
-  openQuestions: string[];
-}
-
 export interface SavedReview {
   snapshot: Snapshot;
   commitContext?: CommitContext;
@@ -270,19 +258,8 @@ export interface SavedReview {
   incremental?: IncrementalComparison;
   readingPosition?: ReadingPosition;
   guide: Guide | null;
-  groupHashes?: string[];
-  notes: Record<string, string>;
-  answers: {
-    question: string;
-    groupIndex: number;
-    groupTitle: string;
-    answer: Answer;
-    createdAt: string;
-  }[];
-  reviewStates?: Record<string, GroupReviewState>;
   claimStates?: Record<string, ClaimReviewState>;
   guideFingerprint?: string;
-  verificationRecords?: VerificationRecord[];
 }
 
 export interface GitLabDiffFile {
@@ -326,53 +303,6 @@ export interface CommentDraft {
   inheritedFrom?: string;
 }
 
-export interface VerificationCase {
-  id: string;
-  title: string;
-  focus: string;
-  refIds: string[];
-  unresolved: boolean;
-}
-
-export interface VerificationRecord {
-  id: string;
-  caseId: string;
-  caseTitle: string;
-  trigger: string;
-  expected: string;
-  scriptName: string;
-  scriptBody: string;
-  command: string[];
-  snapshotId: string;
-  target: string;
-  guideFingerprint: string;
-  imageId: string;
-  startedAt: string;
-  finishedAt: string;
-  durationMs: number;
-  exitCode: number | null;
-  timedOut: boolean;
-  stdout: string;
-  stderr: string;
-  outputTruncated: boolean;
-}
-
-export interface VerificationOptions {
-  available: boolean;
-  reason: string;
-  image: string;
-  scripts: { name: string; body: string }[];
-  cases: VerificationCase[];
-}
-
-export interface VerificationTaskStatus {
-  id: string;
-  reviewId: string;
-  state: 'running' | 'completed' | 'failed';
-  error: string | null;
-  recordId: string | null;
-}
-
 export interface ReviewSummary {
   id: string;
   repo: string;
@@ -396,7 +326,7 @@ export interface CodexStatus {
 export interface TaskStatus {
   id: string;
   reviewId: string;
-  kind: 'guide' | 'question' | 'hunk';
+  kind: 'guide' | 'hunk';
   state: 'running' | 'completed' | 'failed' | 'cancelled';
   progress: string[];
   error: string | null;

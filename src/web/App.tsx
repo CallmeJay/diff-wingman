@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import type {
-  Answer,
   ClaimReviewState,
   CodexStatus,
   CommentDraft,
@@ -19,13 +19,9 @@ import type {
   TaskStatus,
   SymbolImpact,
   SymbolLocation,
-  VerificationOptions,
-  VerificationCase,
-  VerificationTaskStatus,
 } from '../shared/types.js';
 import { listClaims, type ReviewClaim } from '../shared/claims.js';
 import { fileFingerprint, sourceLineCount } from '../shared/review-core.js';
-import { hunkFingerprint } from '../shared/incremental.js';
 import { featureFiles } from '../shared/feature-overview.js';
 import { api } from './api.js';
 import { CodePanel, StaticDiffPanel, type CommentMarker, type DiffJump, type SymbolPick } from './CodePanel.js';
@@ -103,7 +99,7 @@ function Icon({
   name,
   size = 18,
 }: {
-  name: 'branch' | 'spark' | 'file' | 'folder' | 'arrow' | 'clock' | 'check' | 'close';
+  name: 'branch' | 'spark' | 'file' | 'folder' | 'arrow' | 'clock' | 'check' | 'close' | 'trash';
   size?: number;
 }) {
   const paths = {
@@ -137,6 +133,7 @@ function Icon({
     ),
     check: <path d="m5 12 4 4L19 6" />,
     close: <path d="m6 6 12 12M6 18 18 6" />,
+    trash: <><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6M14 11v6" /></>,
   };
   return (
     <svg
@@ -292,31 +289,6 @@ function ClaimReviewCard({
         </div>
       )}
     </div>
-  );
-}
-
-function AnswerView({
-  answer,
-  refs,
-  onRef,
-}: {
-  answer: Answer;
-  refs: SourceRef[];
-  onRef: (ref: SourceRef) => void;
-}) {
-  return (
-    <>
-      {answer.statements.map((statement, index) => (
-        <EvidenceStatement key={index} statement={statement} refs={refs} onRef={onRef} />
-      ))}
-      {answer.openQuestions.length > 0 && (
-        <ul className="question-list">
-          {answer.openQuestions.map((question, index) => (
-            <li key={index}>{question}</li>
-          ))}
-        </ul>
-      )}
-    </>
   );
 }
 
@@ -653,10 +625,9 @@ function FileTree({
 }
 
 // 左侧导航和 AI 总览共用固定快照中的功能归属，避免两个入口显示不同的文件与 hunk。
-function FeatureList({ review, selectedGroup, statusLabel, onGroup, onChange, onUnreviewed }: {
+function FeatureList({ review, selectedGroup, onGroup, onChange, onUnreviewed }: {
   review: SavedReview;
   selectedGroup: number;
-  statusLabel: (index: number) => string;
   onGroup: (index: number) => void;
   onChange: (index: number, file: ReviewFile, change: Change) => void;
   onUnreviewed: (file: ReviewFile, change: Change) => void;
@@ -670,7 +641,7 @@ function FeatureList({ review, selectedGroup, statusLabel, onGroup, onChange, on
           aria-expanded={selectedGroup === index} onClick={() => onGroup(index)}>
           <span>{String(index + 1).padStart(2, '0')}</span>
           <div><strong>{item.title}</strong>
-            <small>{files.length} 个文件 · {item.changeIds.length} 处变更 · {statusLabel(index)}</small></div>
+            <small>{files.length} 个文件 · {item.changeIds.length} 处变更</small></div>
         </button>
         {selectedGroup === index && <div className="feature-file-list" aria-label={`${item.title}对应的文件改动`}>
           {files.map(({ file, changes }) => <div className="feature-file" key={file.id}>
@@ -795,6 +766,7 @@ export function App() {
   const [listingUntracked, setListingUntracked] = useState(false);
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [history, setHistory] = useState<ReviewSummary[]>([]);
+  const [deletingReviewId, setDeletingReviewId] = useState<string | null>(null);
   const [review, setReview] = useState<SavedReview | null>(null);
   const [snapshotFormOpen, setSnapshotFormOpen] = useState(true);
   const reviewId = useRef<string | undefined>();
@@ -821,6 +793,12 @@ export function App() {
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(() => new Set());
   const allFilesScroll = useRef<HTMLDivElement>(null);
   const codeSectionRef = useRef<HTMLElement>(null);
+  const reviewGridRef = useRef<HTMLDivElement>(null);
+  const navigationPanelRef = useRef<HTMLElement>(null);
+  const guidePanelRef = useRef<HTMLElement>(null);
+  const resizeDrag = useRef<{ side: 'left' | 'right'; pointerId: number; startX: number; startWidth: number } | null>(null);
+  const [navigationWidth, setNavigationWidth] = useState<number | null>(null);
+  const [guideWidth, setGuideWidth] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [task, setTask] = useState<TaskStatus | null>(null);
@@ -831,28 +809,10 @@ export function App() {
   const [symbolImpactOpen, setSymbolImpactOpen] = useState(false);
   const [symbolImpactLoading, setSymbolImpactLoading] = useState(false);
   const [error, setError] = useState('');
-  const [question, setQuestion] = useState('');
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [savingNote, setSavingNote] = useState(false);
-  const [noteFeedback, setNoteFeedback] = useState('');
   const [freshness, setFreshness] = useState<{ fresh: boolean; reason?: string } | null>(null);
-  const [reviewStatus, setReviewStatus] = useState<
-    'unread' | 'understood' | 'question' | 'verified'
-  >('unread');
-  const [reviewEvidence, setReviewEvidence] = useState('');
-  const [savingReviewState, setSavingReviewState] = useState(false);
   const [reportPreview, setReportPreview] = useState<{ reviewId: string; markdown: string } | null>(
     null,
   );
-  const [verificationOptions, setVerificationOptions] = useState<VerificationOptions | null>(null);
-  const [verificationOptionError, setVerificationOptionError] = useState('');
-  const [verificationCaseId, setVerificationCaseId] = useState('');
-  const [verificationScope, setVerificationScope] = useState<'related' | 'all'>('related');
-  const [verificationQuery, setVerificationQuery] = useState('');
-  const [verificationScript, setVerificationScript] = useState('');
-  const [verificationTrigger, setVerificationTrigger] = useState('');
-  const [verificationExpected, setVerificationExpected] = useState('');
-  const [verificationTask, setVerificationTask] = useState<VerificationTaskStatus | null>(null);
   const [draftPath, setDraftPath] = useState('');
   const [draftSide, setDraftSide] = useState<Side>('after');
   const [draftLine, setDraftLine] = useState('');
@@ -869,6 +829,7 @@ export function App() {
   const [commentTarget, setCommentTarget] = useState<ReadingPosition | null>(null);
   const [editingLocalCommentId, setEditingLocalCommentId] = useState<string | null>(null);
   const [savingLocalComment, setSavingLocalComment] = useState(false);
+  const commentOverviewRef = useRef<HTMLDetailsElement>(null);
   const commentSectionRef = useRef<HTMLDetailsElement>(null);
   const commentBodyRef = useRef<HTMLTextAreaElement>(null);
   const mrPanelRef = useRef<HTMLDetailsElement>(null);
@@ -981,66 +942,6 @@ export function App() {
     };
   }, [task?.id, task?.state]);
 
-  useEffect(() => {
-    if (!review?.guide || !review.guideFingerprint) {
-      setVerificationOptions(null);
-      return;
-    }
-    let alive = true;
-    setVerificationOptions(null);
-    setVerificationOptionError('');
-    setVerificationCaseId('');
-    setVerificationScope('related');
-    setVerificationQuery('');
-    setVerificationScript('');
-    setVerificationTrigger('');
-    setVerificationExpected('');
-    void api<VerificationOptions>(`/api/reviews/${review.snapshot.id}/verification-options`)
-      .then((value) => {
-        if (alive) setVerificationOptions(value);
-      })
-      .catch((error) => {
-        if (alive) setVerificationOptionError(message(error));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [review?.snapshot.id, review?.guideFingerprint]);
-
-  useEffect(() => {
-    if (verificationTask?.state !== 'running') return;
-    let alive = true;
-    const timer = setInterval(() => {
-      void api<VerificationTaskStatus>(`/api/verifications/${verificationTask.id}`)
-        .then(async (next) => {
-          if (!alive) return;
-          if (next.state === 'completed') {
-            clearInterval(timer);
-            try {
-              const updated = await api<SavedReview>(`/api/reviews/${next.reviewId}`);
-              if (alive && reviewId.current === next.reviewId) {
-                setReview((current) => current?.snapshot.id === next.reviewId ? mergeReviewCore(current, updated) : current);
-                setReportPreview(null);
-              }
-            } catch (error) {
-              if (alive) setError(message(error));
-            }
-          } else if (next.state === 'failed') {
-            clearInterval(timer);
-            setError(next.error ?? '隔离验证失败。');
-          }
-          if (alive) setVerificationTask(next);
-        })
-        .catch((error) => {
-          if (alive) setError(message(error));
-        });
-    }, 1000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [verificationTask?.id, verificationTask?.state]);
-
   const snapshot = review?.snapshot;
   useEffect(() => {
     // 文件 id 在每个快照内从 file-1 重新编号，切换快照时不能沿用折叠状态。
@@ -1058,38 +959,7 @@ export function App() {
   const busy = requesting || task?.state === 'running';
   const changes = snapshot?.files.flatMap((item) => item.changes) ?? [];
   const claims = review?.guide ? listClaims(review.guide) : [];
-  const isCaseUnresolved = (item: VerificationCase) => {
-    if (!item.id.startsWith('claim:')) return true;
-    const state = review?.claimStates?.[item.id.slice('claim:'.length)];
-    return state?.status !== 'confirmed' || state.guideFingerprint !== review?.guideFingerprint;
-  };
   const claimByKey = new Map(claims.map((claim) => [claim.key, claim]));
-  const verificationCases = verificationOptions?.cases ?? [];
-  const caseChangeIds = (item: VerificationCase) => {
-    if (item.id.startsWith('claim:')) return claimByKey.get(item.id.slice(6))?.changeIds ?? [];
-    const question = /^question:(\d+):\d+$/.exec(item.id);
-    return question ? review?.guide?.groups[Number(question[1])]?.changeIds ?? [] : [];
-  };
-  // 导读判断沿用已有 changeIds 归属；只筛选待核对项，不改变验证任务和人工记录。
-  const unresolvedCases = verificationCases.filter(isCaseUnresolved);
-  const activeChangeId = readingPosition?.changeId;
-  const hunkCases = activeChangeId
-    ? unresolvedCases.filter((item) => caseChangeIds(item).includes(activeChangeId)) : [];
-  const featureCases = navigation === 'guide' && group
-    ? unresolvedCases.filter((item) => caseChangeIds(item).some((id) => group.changeIds.includes(id))) : [];
-  const relatedCases = hunkCases.length ? hunkCases : featureCases;
-  const relatedSource = hunkCases.length ? '当前 hunk' : featureCases.length ? '当前功能' : '当前 hunk 或功能';
-  const searchTerm = verificationQuery.trim().toLocaleLowerCase();
-  const shownVerificationCases = (verificationScope === 'related' ? relatedCases :
-    verificationCases.filter((item) => `${item.title} ${item.focus}`.toLocaleLowerCase().includes(searchTerm)))
-    .slice().sort((a, b) => Number(isCaseUnresolved(b)) - Number(isCaseUnresolved(a)));
-  const selectedVerificationCase = verificationCases.find((item) => item.id === verificationCaseId);
-  const selectedCaseOutsideScope = selectedVerificationCase &&
-    !shownVerificationCases.some((item) => item.id === selectedVerificationCase.id);
-  const noteKey = file ? `file:${file.id}` : 'overview';
-  const draftKey = `${snapshot?.id}:${noteKey}`;
-  const note = drafts[draftKey] ?? review?.notes[noteKey] ?? '';
-  const noteChanged = note !== (review?.notes[noteKey] ?? '');
   const overviewComments = [
     ...(review?.commentDrafts ?? []).map((comment) => ({ kind: 'mr' as const, comment })),
     ...(review?.localComments ?? []).map((comment) => ({ kind: 'local' as const, comment })),
@@ -1110,32 +980,6 @@ export function App() {
     }, 300);
     return () => clearTimeout(timer);
   }, [review?.snapshot.id, readingPosition]);
-  const selectedHash = review?.groupHashes?.[selectedGroup];
-  const savedState = selectedHash ? review?.reviewStates?.[selectedHash] : undefined;
-  const groupStatusLabel = (index: number) => {
-    const status = review?.reviewStates?.[review.groupHashes?.[index] ?? '']?.status;
-    const label =
-      status === 'verified'
-        ? '已核实'
-        : status === 'understood'
-        ? '已理解'
-        : status === 'question'
-        ? '有疑问'
-        : '未阅读';
-    if (
-      (review?.gitlab || (snapshot?.mode && snapshot.mode !== 'commits')) &&
-      status &&
-      freshness === null
-    )
-      return `校验中 · 原${label}`;
-    return freshness?.fresh === false && status ? `待重核 · 原${label}` : label;
-  };
-
-  useEffect(() => {
-    setReviewStatus(savedState?.status ?? 'unread');
-    setReviewEvidence(savedState?.evidence ?? '');
-  }, [selectedHash, savedState?.status, savedState?.evidence]);
-
   useEffect(() => {
     if (
       !review?.snapshot.id ||
@@ -1186,7 +1030,7 @@ export function App() {
     setSelectedUntracked(value.snapshot.untracked ?? []);
     setUntracked([]);
     setReview(value);
-    // 建档成功后把空间还给源码；再次展开只改变页面布局，不触碰固定快照和审查记录。
+    // 建档成功后收起抽屉；再次展开只改变展示，不触碰固定快照和审查记录。
     setSnapshotFormOpen(false);
     setHunkMode(null);
     setSymbolPick(null);
@@ -1213,8 +1057,6 @@ export function App() {
     setSelectedGroup(0);
     setNavigation(value.guide ? 'guide' : 'files');
     setFileView('list');
-    setQuestion('');
-    setNoteFeedback('');
     setReportPreview(null);
     setDraftPath(
       value.gitlab?.files.find((item) => item.addedLines.length || item.deletedLines.length)
@@ -1242,6 +1084,33 @@ export function App() {
       if (request === loadCounter.current) openReview(value);
     } catch (error) {
       if (request === loadCounter.current) setError(message(error));
+    }
+  }
+  async function deleteSnapshot(item: ReviewSummary) {
+    if (!window.confirm(`确定永久删除“${basename(item.repo)}”这份快照？\n本机保存的导读和评论会一起删除，无法恢复；源码仓库和 GitLab 不受影响。`)) return;
+    ++loadCounter.current;
+    setDeletingReviewId(item.id);
+    setError('');
+    try {
+      await api<{ deleted: string }>(`/api/reviews/${item.id}`, { method: 'DELETE' });
+      setHistory((current) => current.filter((row) => row.id !== item.id));
+      try {
+        if (localStorage.getItem(lastReviewStorageKey) === item.id) localStorage.removeItem(lastReviewStorageKey);
+      } catch { /* 本地存储不可用时，仍以服务端删除结果为准。 */ }
+      setTask((current) => current?.reviewId === item.id ? null : current);
+      if (reviewId.current === item.id) {
+        // 删除当前快照后回到建档页，清除阅读位置，避免重新载入已删除的记录。
+        setReview(null);
+        setSnapshotFormOpen(true);
+        setSelectedFile(null);
+        setReadingPosition(null);
+        setJump(null);
+        setActiveRef(null);
+      }
+    } catch (error) {
+      setError(message(error));
+    } finally {
+      setDeletingReviewId(null);
     }
   }
   async function createReview(event: React.FormEvent) {
@@ -1309,28 +1178,6 @@ export function App() {
       setError(message(error));
     } finally {
       setPickingRepo(false);
-    }
-  }
-  async function saveReviewState() {
-    if (!review || !selectedHash) return;
-    setSavingReviewState(true);
-    setError('');
-    try {
-      const updated = await api<SavedReview>(`/api/reviews/${review.snapshot.id}/states`, {
-        method: 'PUT',
-        body: {
-          groupIndex: selectedGroup,
-          guideHash: selectedHash,
-          status: reviewStatus,
-          evidence: reviewEvidence,
-        },
-      });
-      setReview((current) => current?.snapshot.id === review.snapshot.id ? mergeReviewCore(current, updated) : current);
-      setReportPreview(null);
-    } catch (error) {
-      setError(message(error));
-    } finally {
-      setSavingReviewState(false);
     }
   }
   async function saveClaim(
@@ -1550,28 +1397,6 @@ export function App() {
       setError(message(error));
     }
   }
-  async function startVerification() {
-    if (!review?.guideFingerprint || !snapshot || !verificationOptions?.available) return;
-    setError('');
-    try {
-      const started = await api<VerificationTaskStatus>(
-        `/api/reviews/${snapshot.id}/verifications`,
-        {
-          method: 'POST',
-          body: {
-            caseId: verificationCaseId,
-            scriptName: verificationScript,
-            trigger: verificationTrigger,
-            expected: verificationExpected,
-            guideFingerprint: review.guideFingerprint,
-          },
-        },
-      );
-      setVerificationTask(started);
-    } catch (error) {
-      setError(message(error));
-    }
-  }
   async function generate() {
     if (!snapshot || busy || !hunkMode) return;
     setRequesting(true);
@@ -1672,50 +1497,6 @@ export function App() {
       if (reviewId.current === snapshot.id) { showRef(ref); setSymbolImpactOpen(false); }
     } catch (error) { setError(message(error)); }
   }
-  async function ask(event: React.FormEvent) {
-    event.preventDefault();
-    if (!snapshot || !question || busy) return;
-    setRequesting(true);
-    setError('');
-    try {
-      setTask(
-        await api<TaskStatus>(`/api/reviews/${snapshot.id}/questions`, {
-          method: 'POST',
-          body: { groupIndex: selectedGroup, question },
-        }),
-      );
-      setQuestion('');
-    } catch (error) {
-      setError(message(error));
-    } finally {
-      setRequesting(false);
-    }
-  }
-  async function saveNote() {
-    if (!snapshot) return;
-    const savingId = snapshot.id;
-    const savingKey = noteKey;
-    const savingText = note;
-    setSavingNote(true);
-    setNoteFeedback('');
-    try {
-      await api(`/api/reviews/${savingId}/notes`, {
-        method: 'PUT',
-        body: { key: savingKey, text: savingText },
-      });
-      setReview((current) =>
-        current?.snapshot.id === savingId
-          ? { ...current, notes: { ...current.notes, [savingKey]: savingText } }
-          : current,
-      );
-      setReportPreview(null);
-      setNoteFeedback('已保存');
-    } catch (error) {
-      setError(message(error));
-    } finally {
-      setSavingNote(false);
-    }
-  }
   function scrollToDiffFile(id: string) {
     const container = allFilesScroll.current;
     const card = [...(container?.querySelectorAll<HTMLElement>('[data-file-id]') ?? [])].find(
@@ -1749,7 +1530,6 @@ export function App() {
     setActiveRef(null);
     setReadingPosition(positionFor(sourceFile, side, line));
     setJump({ side, line, token: ++jumpCounter.current });
-    setNoteFeedback('');
   }
   // 功能导航落到该功能的具体变更块；元数据变更没有可定位的文本行，只选择文件。
   function jumpToChange(sourceFile: ReviewFile, change: Change) {
@@ -1792,8 +1572,7 @@ export function App() {
       setActiveRef(null);
       setReadingPosition(null);
       setJump(null);
-      setNoteFeedback('');
-    }
+      }
   }
   function showRef(ref: SourceRef) {
     if (!snapshot) return;
@@ -1806,7 +1585,6 @@ export function App() {
       setReadingPosition(positionFor(matching, ref.side, ref.startLine));
       setJump({ side: ref.side, line: ref.startLine, token: ++jumpCounter.current });
     }
-    setNoteFeedback('');
   }
   function chooseGroup(index: number) {
     setSelectedGroup(index);
@@ -1817,7 +1595,6 @@ export function App() {
       const sourceFile = snapshot?.files.find((item) => item.id === firstChange.fileId);
       if (sourceFile) jumpToChange(sourceFile, firstChange);
     }
-    setNoteFeedback('');
   }
   function chooseFeatureChange(index: number, sourceFile: ReviewFile, change: Change) {
     // 从 AI 总览跳转时沿用阅读路线的功能高亮，不改变文件审查或人工理解状态。
@@ -1914,18 +1691,6 @@ export function App() {
         else delete fileStates[targetFile.id];
         return { ...current, fileStates };
       });
-    } catch (error) { setError(message(error)); }
-  }
-  async function updateHunkStatus(status: FileStatus) {
-    const active = visibleHunks[activeHunkIndex];
-    if (!review || !active || !fileStatesFresh) return;
-    const savingId = review.snapshot.id;
-    try {
-      const updated = await api<SavedReview>(`/api/reviews/${savingId}/hunk-states`, {
-        method: 'PUT', body: { fileId: active.file.id, changeId: active.change.id, status },
-      });
-      if (reviewId.current === savingId) setReview((current) => current?.snapshot.id === savingId
-        ? { ...current, hunkStates: updated.hunkStates, fileStates: updated.fileStates } : current);
     } catch (error) { setError(message(error)); }
   }
   function openComment() {
@@ -2028,40 +1793,70 @@ export function App() {
         : versionOptions.length
           ? '从仓库版本中选择'
           : '没有可选择的版本';
+  const reviewGridStyle = {
+    '--review-nav-width': navigationWidth === null ? undefined : `${navigationWidth}px`,
+    '--review-guide-width': guideWidth === null ? undefined : `${guideWidth}px`,
+  } as CSSProperties;
+
+  // 两侧栏仅调整阅读布局；拖动时保留中间源码的可读宽度，窄屏仍走原有布局。
+  function updateReviewPanelWidth(side: 'left' | 'right', requestedWidth: number) {
+    const grid = reviewGridRef.current;
+    const other = (side === 'left' ? guidePanelRef : navigationPanelRef).current;
+    if (!grid || !other) return;
+    const gridWidth = grid.getBoundingClientRect().width;
+    const otherWidth = other.getBoundingClientRect().width;
+    const minimum = side === 'left' ? 150 : 250;
+    const maximum = Math.max(minimum, Math.min(
+      side === 'left' ? 420 : 600,
+      gridWidth * (side === 'left' ? 0.3 : 0.4),
+      gridWidth - otherWidth - 250,
+    ));
+    const width = Math.round(Math.max(minimum, Math.min(requestedWidth, maximum)));
+    if (side === 'left') setNavigationWidth(width);
+    else setGuideWidth(width);
+  }
+  function beginReviewPanelResize(side: 'left' | 'right', event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const panel = (side === 'left' ? navigationPanelRef : guidePanelRef).current;
+    if (!panel) return;
+    resizeDrag.current = { side, pointerId: event.pointerId, startX: event.clientX,
+      startWidth: panel.getBoundingClientRect().width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+  function moveReviewPanelResize(side: 'left' | 'right', event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = resizeDrag.current;
+    if (!drag || drag.side !== side || drag.pointerId !== event.pointerId) return;
+    const delta = event.clientX - drag.startX;
+    updateReviewPanelWidth(side, drag.startWidth + (side === 'left' ? delta : -delta));
+    event.preventDefault();
+  }
+  function endReviewPanelResize(side: 'left' | 'right', event: ReactPointerEvent<HTMLButtonElement>) {
+    if (resizeDrag.current?.side === side && resizeDrag.current.pointerId === event.pointerId) resizeDrag.current = null;
+  }
+  function keyReviewPanelResize(side: 'left' | 'right', event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const panel = (side === 'left' ? navigationPanelRef : guidePanelRef).current;
+    if (!panel) return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowRight' ? 20 : -20;
+    updateReviewPanelWidth(side, panel.getBoundingClientRect().width + (side === 'left' ? delta : -delta));
+  }
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <a className="brand" href="/" aria-label="Diff Wingman 首页">
-          <span className="brand-mark">
-            <Icon name="branch" size={22} />
-          </span>
-          <span>
-            Diff<span className="brand-light"> Wingman</span>
-          </span>
-          <span className="version-tag">v0.0.12</span>
-        </a>
-        <div className="header-status">
-          <span className="local-tag">LOCAL WORKSPACE</span>
-          <span className={`status-dot ${status?.subscription ? 'online' : ''}`} />
-          <span>
-            {status ? (status.subscription ? 'Codex 已连接' : 'Codex 未就绪') : '连接中…'}
-          </span>
-          <button
-            className="icon-button"
-            aria-label="刷新 Codex 状态"
-            onClick={() => {
-              void api<CodexStatus>('/api/status')
-                .then(setStatus)
-                .catch((error) => setError(message(error)));
-            }}
-          >
-            ↻
-          </button>
-        </div>
-      </header>
-      <div className={`app-body${review && !snapshotFormOpen ? ' snapshot-compact' : ''}`}>
+      <div className={`app-body${review ? ` review-drawer${snapshotFormOpen ? ' drawer-open' : ''}` : ''}`}>
+        {review && snapshotFormOpen && <button type="button" className="snapshot-drawer-backdrop" aria-label="收起选择" onClick={() => setSnapshotFormOpen(false)} />}
         <aside className="sidebar" id="snapshot-sidebar">
+          <a className="brand" href="/" aria-label="Diff Wingman 首页">
+            <span className="brand-mark">
+              <Icon name="branch" size={22} />
+            </span>
+            <span>
+              Diff<span className="brand-light"> Wingman</span>
+            </span>
+            <span className="version-tag">v0.0.13</span>
+          </a>
           <div className="sidebar-heading">
             <Icon name="branch" />
             <span>建立审查快照</span>
@@ -2301,37 +2096,47 @@ export function App() {
           </div>
           <div className="history-list">
             {history.length ? (
-              history.map((item) => (
-                <button
-                  key={item.id}
-                  className={`history-item ${snapshot?.id === item.id ? 'active' : ''}`}
-                  onClick={() => void loadReview(item.id)}
-                >
-                  <span className="history-title">
-                    {basename(item.repo)}
-                    {item.gitlabUrl && <span title={item.gitlabUrl}> · MR</span>}
-                    {item.hasGuide && <span className="history-guide-dot" title="已有导读" />}
-                  </span>
-                  <span className="mono">
-                    {short(item.base)} →{' '}
-                    {item.mode === 'staged'
-                      ? '暂存区'
-                      : item.mode === 'working'
-                      ? '工作区'
-                      : short(item.target)}
-                  </span>
-                  <span className="history-meta">
-                    {item.files} 个文件 · {new Date(item.createdAt).toLocaleDateString('zh-CN')}
-                  </span>
-                </button>
-              ))
+              history.map((item) => {
+                const running = task?.reviewId === item.id && task.state === 'running';
+                return <div className="history-row" key={item.id}>
+                  <button
+                    className={`history-item ${snapshot?.id === item.id ? 'active' : ''}`}
+                    disabled={deletingReviewId !== null}
+                    onClick={() => void loadReview(item.id)}
+                  >
+                    <span className="history-title">
+                      {basename(item.repo)}
+                      {item.gitlabUrl && <span title={item.gitlabUrl}> · MR</span>}
+                      {item.hasGuide && <span className="history-guide-dot" title="已有导读" />}
+                    </span>
+                    <span className="mono">
+                      {short(item.base)} →{' '}
+                      {item.mode === 'staged'
+                        ? '暂存区'
+                        : item.mode === 'working'
+                        ? '工作区'
+                        : short(item.target)}
+                    </span>
+                    <span className="history-meta">
+                      {item.files} 个文件 · {new Date(item.createdAt).toLocaleDateString('zh-CN')}
+                    </span>
+                  </button>
+                  <button type="button" className="history-delete"
+                    aria-label={`删除快照 ${basename(item.repo)} ${short(item.id)}`}
+                    title={running ? '任务运行中，暂不能删除此快照' : '删除快照'}
+                    disabled={deletingReviewId !== null || running}
+                    onClick={() => void deleteSnapshot(item)}>
+                    <Icon name="trash" size={15} />
+                  </button>
+                </div>;
+              })
             ) : (
               <p className="muted small">打开的快照会保存在本机。</p>
             )}
           </div>
           <div className="sidebar-footer">
             <span className="status-dot online" />
-            源码只读 · 笔记本地保存
+            源码只读 · 审查记录本地保存
           </div>
         </aside>
         <main className="workspace">
@@ -2422,9 +2227,9 @@ export function App() {
                   <span className="step-number">03</span>
                   <h3>核对理解</h3>
                   <p>
-                    点击证据、追问细节，
+                    点击证据、核对细节，
                     <br />
-                    留下自己的审查笔记。
+                    记录自己的审查判断。
                   </p>
                 </div>
               </div>
@@ -2437,17 +2242,47 @@ export function App() {
             <>
               <div className="review-heading">
                 <div>
-                  <div className="eyebrow">
-                    REVIEW SNAPSHOT <span>{snapshot.id.slice(0, 6)}</span>
+                  <div className="review-title-row">
+                    <h1>
+                      {basename(snapshot.repo)} <span className="snapshot-badge">固定快照</span>
+                    </h1>
                     <button type="button" className="snapshot-select-button" aria-controls="snapshot-sidebar"
                       aria-expanded={snapshotFormOpen} onClick={() => setSnapshotFormOpen((open) => !open)}>
-                      {snapshotFormOpen ? '收起选择' : '重新选择'}
+                      重新选择
                     </button>
                   </div>
-                  <h1>
-                    {basename(snapshot.repo)} <span className="snapshot-badge">固定快照</span>
-                  </h1>
-                  <p title={snapshot.repo}>{snapshot.repo}</p>
+                  <div className="snapshot-meta">
+                    <p title={snapshot.repo}>{snapshot.repo}</p>
+                    <details className="comment-overview" ref={commentOverviewRef}>
+                      <summary>评论 {overviewComments.length} · 未解决 {overviewComments.filter((item) => !item.comment.resolved).length}</summary>
+                      <div className="mr-panel-content">
+                        <p>评论状态只保存在本机；“已解决”不改变 GitLab 讨论状态。</p>
+                        {overviewComments.length === 0 && <p>当前快照尚无评论。</p>}
+                        {overviewComments.map((item) => {
+                          const comment = item.comment;
+                          const destination = item.kind === 'local'
+                            ? snapshot.files.find((row) => row.id === item.comment.fileId && row.path === comment.path)
+                            : snapshot.files.find((row) => row.path === comment.path);
+                          return <div className="mr-draft-item" key={`${item.kind}:${comment.id}`}>
+                            <strong>{commentCategoryLabel[comment.category ?? 'problem']} · {comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''}`}</strong>
+                            <span>{comment.resolved ? '已解决' : '未解决'} · {comment.anchorStatus === 'pending' ? '待重新定位' : '位置有效'} · {item.kind === 'mr' ? 'MR 本地草稿' : '本地评论'}</span>
+                            <p>{comment.body}</p>
+                            {comment.anchorReason && <small>{comment.anchorReason}</small>}
+                            <div className="mr-actions">
+                              <button type="button" className="secondary-button" disabled={!destination || comment.anchorStatus === 'pending'} onClick={() => {
+                                if (!destination) return;
+                                if (commentOverviewRef.current) commentOverviewRef.current.open = false;
+                                comment.scope === 'file' ? chooseFile(destination.id) : jumpTo(destination, comment.side, comment.line);
+                              }}>定位到 diff</button>
+                              {comment.anchorStatus === 'pending' && (item.kind === 'mr'
+                                ? <button type="button" className="secondary-button" disabled={freshness?.fresh !== true} onClick={() => { if (commentOverviewRef.current) commentOverviewRef.current.open = false; beginEditDraft(item.comment); }}>重新定位</button>
+                                : <button type="button" className="secondary-button" disabled={!file || !fileStatesFresh} onClick={() => { if (file) { if (commentOverviewRef.current) commentOverviewRef.current.open = false; beginEditLocalComment(item.comment, file); } }}>在当前文件重新定位</button>)}
+                            </div>
+                          </div>;
+                        })}
+                      </div>
+                    </details>
+                  </div>
                 </div>
                 <div className="review-stats">
                   <div className="commit-range">
@@ -2502,34 +2337,6 @@ export function App() {
                   </div>
                 </div>
               </details>}
-              <details className="mr-panel comment-overview">
-                <summary>评论总览 · {overviewComments.length} 条 · {overviewComments.filter((item) => !item.comment.resolved).length} 条未解决</summary>
-                <div className="mr-panel-content">
-                  <p>评论状态只保存在本机；“已解决”不改变 GitLab 讨论状态。</p>
-                  {overviewComments.length === 0 && <p>当前快照尚无评论。</p>}
-                  {overviewComments.map((item) => {
-                    const comment = item.comment;
-                    const destination = item.kind === 'local'
-                      ? snapshot.files.find((row) => row.id === item.comment.fileId && row.path === comment.path)
-                      : snapshot.files.find((row) => row.path === comment.path);
-                    return <div className="mr-draft-item" key={`${item.kind}:${comment.id}`}>
-                      <strong>{commentCategoryLabel[comment.category ?? 'problem']} · {comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''}`}</strong>
-                      <span>{comment.resolved ? '已解决' : '未解决'} · {comment.anchorStatus === 'pending' ? '待重新定位' : '位置有效'} · {item.kind === 'mr' ? 'MR 本地草稿' : '本地评论'}</span>
-                      <p>{comment.body}</p>
-                      {comment.anchorReason && <small>{comment.anchorReason}</small>}
-                      <div className="mr-actions">
-                        <button type="button" className="secondary-button" disabled={!destination || comment.anchorStatus === 'pending'} onClick={() => {
-                          if (!destination) return;
-                          comment.scope === 'file' ? chooseFile(destination.id) : jumpTo(destination, comment.side, comment.line);
-                        }}>定位到 diff</button>
-                        {comment.anchorStatus === 'pending' && (item.kind === 'mr'
-                          ? <button type="button" className="secondary-button" disabled={freshness?.fresh !== true} onClick={() => beginEditDraft(item.comment)}>重新定位</button>
-                          : <button type="button" className="secondary-button" disabled={!file || !fileStatesFresh} onClick={() => { if (file) beginEditLocalComment(item.comment, file); }}>在当前文件重新定位</button>)}
-                      </div>
-                    </div>;
-                  })}
-                </div>
-              </details>
               {review.gitlab && (
                 <details className="mr-panel" ref={mrPanelRef}>
                   <summary>
@@ -2753,81 +2560,6 @@ export function App() {
                   </div>
                 </details>
               )}
-              {!review.gitlab && <details className="mr-panel" ref={commentSectionRef}>
-                <summary>当前文件的本地评论 · {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).length}</summary>
-                <div className="mr-panel-content">
-                  <p>评论只保存在当前快照，不会发布到代码托管平台。先点击 diff 行，再选择“评论当前位置”。</p>
-                  <button className="secondary-button" type="button" disabled={!file || !fileStatesFresh} onClick={() => {
-                    if (!file) return;
-                    setCommentTarget({ fileId: file.id, side: 'after', line: 0 });
-                    setEditingLocalCommentId(null); setDraftScope('file'); setDraftEndLine('');
-                    setDraftBody(''); setDraftEvidence('');
-                  }}>评论当前文件</button>
-                  {commentTarget && commentTarget.fileId === file?.id && <form className="mr-draft-form" onSubmit={(event) => void saveLocalComment(event)}>
-                    <strong className="mr-wide">{file?.path}{draftScope === 'file' ? ' · 文件级' : `:${commentTarget.line} · ${commentTarget.side === 'before' ? '修改前' : '修改后'}`}</strong>
-                    <label>位置类型
-                      <select aria-label="本地评论位置类型" value={draftScope} onChange={(event) => {
-                        const scope = event.target.value as typeof draftScope;
-                        if (scope !== 'file' && commentTarget.line === 0 && file) {
-                          const first = firstPosition(file);
-                          if (!first) return;
-                          setCommentTarget({ fileId: file.id, side: first.side, line: first.line });
-                        }
-                        setDraftScope(scope); setDraftEndLine('');
-                      }}><option value="line">单行</option><option value="range">多行</option><option value="file">文件级</option></select>
-                    </label>
-                    {draftScope !== 'file' && <>
-                      <label>侧别
-                        <select aria-label="本地评论侧别" value={commentTarget.side} onChange={(event) => setCommentTarget((current) => current && ({ ...current, side: event.target.value as Side }))}>
-                          <option value="after">修改后</option><option value="before">修改前</option>
-                        </select>
-                      </label>
-                      <label>起始行号
-                        <input aria-label="本地评论起始行号" type="number" min="1" required value={commentTarget.line || ''} onChange={(event) => setCommentTarget((current) => current && ({ ...current, line: Number(event.target.value) }))} />
-                      </label>
-                    </>}
-                    {draftScope === 'range' && <label>结束行号
-                      <input aria-label="本地评论结束行号" type="number" min="1" required value={draftEndLine} onChange={(event) => setDraftEndLine(event.target.value)} />
-                    </label>}
-                    <label>评论类型
-                      <select aria-label="本地评论类型" value={draftCategory} onChange={(event) => { const category = event.target.value as CommentCategory; setDraftCategory(category); if (category !== 'suggestion') setDraftSuggestion(''); }}>
-                        {Object.entries(commentCategoryLabel).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-                      </select>
-                    </label>
-                    <label>本地状态
-                      <select aria-label="本地评论解决状态" value={draftResolved ? 'resolved' : 'open'} onChange={(event) => setDraftResolved(event.target.value === 'resolved')}>
-                        <option value="open">未解决</option><option value="resolved">已解决</option>
-                      </select>
-                    </label>
-                    {draftCategory === 'suggestion' && <label className="mr-wide">修改建议代码块
-                      <textarea aria-label="本地评论修改建议代码" maxLength={5000} rows={4} value={draftSuggestion} onChange={(event) => setDraftSuggestion(event.target.value)} />
-                    </label>}
-                    <label className="mr-wide">问题描述
-                      <textarea ref={commentBodyRef} aria-label="本地评论问题描述" required maxLength={5000} rows={2} value={draftBody} onChange={(event) => setDraftBody(event.target.value)} />
-                    </label>
-                    <label className="mr-wide">人工验证依据
-                      <textarea aria-label="本地评论人工依据" required maxLength={5000} rows={2} value={draftEvidence} onChange={(event) => setDraftEvidence(event.target.value)} />
-                    </label>
-                    <div className="mr-actions mr-wide">
-                      <button className="secondary-button" type="submit" disabled={savingLocalComment || !fileStatesFresh || !draftBody.trim() || !draftEvidence.trim() ||
-                        (draftScope !== 'file' && commentTarget.line < 1) || (draftScope === 'range' && (!draftEndLine || Number(draftEndLine) <= commentTarget.line))}>{savingLocalComment ? '保存中…' : editingLocalCommentId ? '更新本地评论' : '保存本地评论'}</button>
-                      <button className="secondary-button" type="button" onClick={() => { setCommentTarget(null); setEditingLocalCommentId(null); setDraftBody(''); setDraftEvidence(''); }}>取消</button>
-                    </div>
-                  </form>}
-                  {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).map((comment) => <div className="mr-draft-item" key={comment.id}>
-                    <strong>{comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''} · ${comment.side === 'before' ? '修改前' : '修改后'}`}</strong>
-                    <span>{comment.anchorStatus === 'pending' ? '待重新定位' : fileStatesFresh ? '未发布 · 本地评论' : '待重核 · 旧快照评论'} · {commentCategoryLabel[comment.category ?? 'problem']} · {comment.resolved ? '已解决' : '未解决'}</span>
-                    {comment.anchorReason && <small>{comment.anchorReason}</small>}
-                    <p>{comment.body}</p><p>人工依据：{comment.evidence}</p>
-                    {comment.suggestion && <pre className="comment-suggestion"><code>{comment.suggestion}</code></pre>}
-                    <div className="mr-actions">
-                      <button className="secondary-button" type="button" disabled={comment.anchorStatus === 'pending'} onClick={() => { if (file) comment.scope === 'file' ? chooseFile(file.id) : jumpTo(file, comment.side, comment.line); }}>定位</button>
-                      <button className="secondary-button" type="button" disabled={!fileStatesFresh || !file} onClick={() => { if (file) beginEditLocalComment(comment, file); }}>编辑</button>
-                      <button className="secondary-button" type="button" onClick={() => void deleteLocalComment(comment)}>删除</button>
-                    </div>
-                  </div>)}
-                </div>
-              </details>}
               {(review.gitlab || (snapshot.mode && snapshot.mode !== 'commits')) &&
                 freshness?.fresh === false && (
                   <div className="stale-banner" role="status">
@@ -2846,8 +2578,8 @@ export function App() {
                   <p>可以重新选择基线或目标版本。</p>
                 </div>
               ) : (
-                <div className="review-grid">
-                  <nav className="review-navigation">
+                <div className="review-grid" ref={reviewGridRef} style={reviewGridStyle}>
+                  <nav className="review-navigation" ref={navigationPanelRef}>
                     <div className="nav-tabs">
                       <button
                         className={navigation === 'files' ? 'selected' : ''}
@@ -2932,7 +2664,7 @@ export function App() {
                       ) : review.guide ? (
                         <>
                           <p className="nav-caption">{review.commitContext ? '按功能查看 · 点击后列出文件和变更块' : '旧版阅读分组 · 重新生成后按功能整理'}</p>
-                          <FeatureList review={review} selectedGroup={selectedGroup} statusLabel={groupStatusLabel}
+                          <FeatureList review={review} selectedGroup={selectedGroup}
                             onGroup={chooseGroup} onChange={(_, sourceFile, change) => jumpToChange(sourceFile, change)}
                             onUnreviewed={(sourceFile, change) => { setSelectedGroup(-1); jumpToChange(sourceFile, change); }} />
                         </>
@@ -2950,6 +2682,13 @@ export function App() {
                     <div className="nav-footer">
                       显示 {visibleFiles.length}/{snapshot.files.length} 个文件 · {changes.length} 处变更
                     </div>
+                    <button type="button" className="review-resizer left" aria-label="调整文件导航宽度，拖动或使用左右方向键"
+                      onPointerDown={(event) => beginReviewPanelResize('left', event)}
+                      onPointerMove={(event) => moveReviewPanelResize('left', event)}
+                      onPointerUp={(event) => endReviewPanelResize('left', event)}
+                      onPointerCancel={(event) => endReviewPanelResize('left', event)}
+                      onLostPointerCapture={() => { resizeDrag.current = null; }}
+                      onKeyDown={(event) => keyReviewPanelResize('left', event)} />
                   </nav>
                   <section className="code-section" ref={codeSectionRef} tabIndex={-1}>
                     <div className="code-heading">
@@ -2999,26 +2738,86 @@ export function App() {
                       </div>
                       <div className="review-core-state">
                         <span className="hunk-range" title={visibleHunks[activeHunkIndex]?.change.label ?? ''}>{visibleHunks[activeHunkIndex]?.change.label ?? '无当前变更块'}</span>
-                        <select aria-label="当前变更块审查状态" disabled={activeHunkIndex < 0 || !fileStatesFresh}
-                          value={(() => {
-                            const active = visibleHunks[activeHunkIndex];
-                            const state = active && review.hunkStates?.[active.change.id];
-                            return active && state?.fingerprint === hunkFingerprint(active.file, active.change) ? state.status : 'unread';
-                          })()}
-                          onChange={(event) => void updateHunkStatus(event.target.value as FileStatus)}>
-                          <option value="unread">{(() => {
-                            const active = visibleHunks[activeHunkIndex];
-                            return active && !review.hunkStates?.[active.change.id] && currentFileStatus(review, active.file, fileStatesFresh) === 'reviewed'
-                              ? '逐块未单独记录（文件已审查）' : '变更块未阅读';
-                          })()}</option><option value="in_progress">变更块审查中</option>
-                          <option value="question">变更块有疑问</option><option value="reviewed">变更块已审查</option>
-                        </select>
                         <select aria-label="当前文件审查状态" value={file ? currentFileStatus(review, file, fileStatesFresh) : 'unread'} disabled={!file || !fileStatesFresh}
                           onChange={(event) => void updateFileStatus(event.target.value as FileStatus)}>
                           <option value="unread">未阅读</option><option value="in_progress">审查中</option><option value="question">有疑问</option><option value="reviewed">已审查</option>
                         </select>
-                        <button type="button" onClick={() => void updateFileStatus('reviewed')} disabled={!file || !fileStatesFresh} title="标记已审查 · Alt+R">已审查</button>
                         <button type="button" onClick={openComment} disabled={!file || !fileStatesFresh || Boolean(file.issue)} title="当前位置创建评论 · Alt+C">评论当前位置</button>
+                        {!review.gitlab && <details className="file-comment-panel" ref={commentSectionRef}>
+                          <summary>当前文件评论 · {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).length}</summary>
+                          <div className="mr-panel-content">
+                            <p>评论只保存在当前快照，不会发布到代码托管平台。先点击 diff 行，再选择“评论当前位置”。</p>
+                            <button className="secondary-button" type="button" disabled={!file || !fileStatesFresh} onClick={() => {
+                              if (!file) return;
+                              setCommentTarget({ fileId: file.id, side: 'after', line: 0 });
+                              setEditingLocalCommentId(null); setDraftScope('file'); setDraftEndLine('');
+                              setDraftBody(''); setDraftEvidence('');
+                            }}>评论当前文件</button>
+                            {commentTarget && commentTarget.fileId === file?.id && <form className="mr-draft-form" onSubmit={(event) => void saveLocalComment(event)}>
+                              <strong className="mr-wide">{file?.path}{draftScope === 'file' ? ' · 文件级' : `:${commentTarget.line} · ${commentTarget.side === 'before' ? '修改前' : '修改后'}`}</strong>
+                              <label>位置类型
+                                <select aria-label="本地评论位置类型" value={draftScope} onChange={(event) => {
+                                  const scope = event.target.value as typeof draftScope;
+                                  if (scope !== 'file' && commentTarget.line === 0 && file) {
+                                    const first = firstPosition(file);
+                                    if (!first) return;
+                                    setCommentTarget({ fileId: file.id, side: first.side, line: first.line });
+                                  }
+                                  setDraftScope(scope); setDraftEndLine('');
+                                }}><option value="line">单行</option><option value="range">多行</option><option value="file">文件级</option></select>
+                              </label>
+                              {draftScope !== 'file' && <>
+                                <label>侧别
+                                  <select aria-label="本地评论侧别" value={commentTarget.side} onChange={(event) => setCommentTarget((current) => current && ({ ...current, side: event.target.value as Side }))}>
+                                    <option value="after">修改后</option><option value="before">修改前</option>
+                                  </select>
+                                </label>
+                                <label>起始行号
+                                  <input aria-label="本地评论起始行号" type="number" min="1" required value={commentTarget.line || ''} onChange={(event) => setCommentTarget((current) => current && ({ ...current, line: Number(event.target.value) }))} />
+                                </label>
+                              </>}
+                              {draftScope === 'range' && <label>结束行号
+                                <input aria-label="本地评论结束行号" type="number" min="1" required value={draftEndLine} onChange={(event) => setDraftEndLine(event.target.value)} />
+                              </label>}
+                              <label>评论类型
+                                <select aria-label="本地评论类型" value={draftCategory} onChange={(event) => { const category = event.target.value as CommentCategory; setDraftCategory(category); if (category !== 'suggestion') setDraftSuggestion(''); }}>
+                                  {Object.entries(commentCategoryLabel).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                                </select>
+                              </label>
+                              <label>本地状态
+                                <select aria-label="本地评论解决状态" value={draftResolved ? 'resolved' : 'open'} onChange={(event) => setDraftResolved(event.target.value === 'resolved')}>
+                                  <option value="open">未解决</option><option value="resolved">已解决</option>
+                                </select>
+                              </label>
+                              {draftCategory === 'suggestion' && <label className="mr-wide">修改建议代码块
+                                <textarea aria-label="本地评论修改建议代码" maxLength={5000} rows={4} value={draftSuggestion} onChange={(event) => setDraftSuggestion(event.target.value)} />
+                              </label>}
+                              <label className="mr-wide">问题描述
+                                <textarea ref={commentBodyRef} aria-label="本地评论问题描述" required maxLength={5000} rows={2} value={draftBody} onChange={(event) => setDraftBody(event.target.value)} />
+                              </label>
+                              <label className="mr-wide">人工验证依据
+                                <textarea aria-label="本地评论人工依据" required maxLength={5000} rows={2} value={draftEvidence} onChange={(event) => setDraftEvidence(event.target.value)} />
+                              </label>
+                              <div className="mr-actions mr-wide">
+                                <button className="secondary-button" type="submit" disabled={savingLocalComment || !fileStatesFresh || !draftBody.trim() || !draftEvidence.trim() ||
+                                  (draftScope !== 'file' && commentTarget.line < 1) || (draftScope === 'range' && (!draftEndLine || Number(draftEndLine) <= commentTarget.line))}>{savingLocalComment ? '保存中…' : editingLocalCommentId ? '更新本地评论' : '保存本地评论'}</button>
+                                <button className="secondary-button" type="button" onClick={() => { setCommentTarget(null); setEditingLocalCommentId(null); setDraftBody(''); setDraftEvidence(''); }}>取消</button>
+                              </div>
+                            </form>}
+                            {(review.localComments ?? []).filter((item) => item.fileId === file?.id && item.path === file?.path).map((comment) => <div className="mr-draft-item" key={comment.id}>
+                              <strong>{comment.path}{comment.scope === 'file' ? ' · 文件级' : `:${comment.line}${comment.scope === 'range' ? `-${comment.endLine}` : ''} · ${comment.side === 'before' ? '修改前' : '修改后'}`}</strong>
+                              <span>{comment.anchorStatus === 'pending' ? '待重新定位' : fileStatesFresh ? '未发布 · 本地评论' : '待重核 · 旧快照评论'} · {commentCategoryLabel[comment.category ?? 'problem']} · {comment.resolved ? '已解决' : '未解决'}</span>
+                              {comment.anchorReason && <small>{comment.anchorReason}</small>}
+                              <p>{comment.body}</p><p>人工依据：{comment.evidence}</p>
+                              {comment.suggestion && <pre className="comment-suggestion"><code>{comment.suggestion}</code></pre>}
+                              <div className="mr-actions">
+                                <button className="secondary-button" type="button" disabled={comment.anchorStatus === 'pending'} onClick={() => { if (file) { if (commentSectionRef.current) commentSectionRef.current.open = false; comment.scope === 'file' ? chooseFile(file.id) : jumpTo(file, comment.side, comment.line); } }}>定位</button>
+                                <button className="secondary-button" type="button" disabled={!fileStatesFresh || !file} onClick={() => { if (file) beginEditLocalComment(comment, file); }}>编辑</button>
+                                <button className="secondary-button" type="button" onClick={() => void deleteLocalComment(comment)}>删除</button>
+                              </div>
+                            </div>)}
+                          </div>
+                        </details>}
                       </div>
                     </div>
                     <div className="symbol-pick-bar">
@@ -3090,13 +2889,28 @@ export function App() {
                       </span>
                     </div>
                   </section>
-                  <aside className="guide-panel">
+                  <aside className="guide-panel" ref={guidePanelRef}>
+                    <button type="button" className="review-resizer right" aria-label="调整 AI 导读宽度，拖动或使用左右方向键"
+                      onPointerDown={(event) => beginReviewPanelResize('right', event)}
+                      onPointerMove={(event) => moveReviewPanelResize('right', event)}
+                      onPointerUp={(event) => endReviewPanelResize('right', event)}
+                      onPointerCancel={(event) => endReviewPanelResize('right', event)}
+                      onLostPointerCapture={() => { resizeDrag.current = null; }}
+                      onKeyDown={(event) => keyReviewPanelResize('right', event)} />
                     <div className="panel-heading">
                       <span>
                         <Icon name="spark" size={17} />
                         AI 导读
                       </span>
-                      <span className="provider-label">CODEX</span>
+                      <span className="codex-status">
+                        <span className={`status-dot ${status?.subscription ? 'online' : ''}`} />
+                        <span>{status ? (status.subscription ? 'Codex 已连接' : 'Codex 未就绪') : '连接中…'}</span>
+                        <button type="button" className="icon-button" aria-label="刷新 Codex 状态" onClick={() => {
+                          void api<CodexStatus>('/api/status')
+                            .then(setStatus)
+                            .catch((error) => setError(message(error)));
+                        }}>↻</button>
+                      </span>
                     </div>
                     <div className="guide-scroll">
                       <div className="generate-block">
@@ -3150,8 +2964,8 @@ export function App() {
                           {review.guide.groups.length} 个{review.commitContext ? '功能或变更主题' : '阅读分组'} · 已归类 {review.guide.groups.reduce((count, item) => count + item.changeIds.length, 0)}/{changes.length} 处变更
                           {' · '}待人工核对 {review.guide.unreviewed.length} 处
                         </div>
-                        <p className="feature-count-note">已归类只表示进入阅读分组，不等于逐块解释或人工核实；功能标签是独立的分组状态。</p>
-                        <FeatureList review={review} selectedGroup={selectedGroup} statusLabel={groupStatusLabel}
+                        <p className="feature-count-note">已归类只表示进入阅读分组，不等于逐块解释或人工核实。</p>
+                        <FeatureList review={review} selectedGroup={selectedGroup}
                           onGroup={(index) => { setNavigation('guide'); chooseGroup(index); }}
                           onChange={chooseFeatureChange}
                           onUnreviewed={(sourceFile, change) => {
@@ -3314,77 +3128,10 @@ export function App() {
                                   </ul>
                                 </section>
                               )}
-                              <section className="detail-section review-state-section">
-                                <h3>人工审查状态</h3>
-                                <label>
-                                  当前判断
-                                  <select
-                                    aria-label="人工审查状态"
-                                    value={reviewStatus}
-                                    onChange={(event) =>
-                                      setReviewStatus(event.target.value as typeof reviewStatus)
-                                    }
-                                  >
-                                    <option value="unread">未阅读</option>
-                                    <option value="understood">已理解</option>
-                                    <option value="question">有疑问</option>
-                                    <option value="verified">已核实</option>
-                                  </select>
-                                </label>
-                                <label>
-                                  人工依据或疑问
-                                  <textarea
-                                    aria-label="人工依据或疑问"
-                                    value={reviewEvidence}
-                                    onChange={(event) => setReviewEvidence(event.target.value)}
-                                    rows={3}
-                                    maxLength={5000}
-                                    placeholder="例如：手动复现、测试结果或尚待确认的契约"
-                                  />
-                                </label>
-                                <button
-                                  className="secondary-button"
-                                  disabled={
-                                    savingReviewState ||
-                                    !selectedHash ||
-                                    (reviewStatus === 'verified' &&
-                                      (!reviewEvidence.trim() || freshness?.fresh !== true)) ||
-                                    (reviewStatus === (savedState?.status ?? 'unread') &&
-                                      reviewEvidence === (savedState?.evidence ?? ''))
-                                  }
-                                  onClick={() => void saveReviewState()}
-                                >
-                                  {savingReviewState ? '保存中…' : '保存人工状态'}
-                                </button>
-                                {freshness?.fresh === false && (
-                                  <p className="muted small">
-                                    源码已变化，请创建当前快照后重新核实。
-                                  </p>
-                                )}
-                              </section>
-                              <form className="question-form" onSubmit={ask}>
-                                <label htmlFor="question">围绕这个分组继续追问</label>
-                                <textarea
-                                  id="question"
-                                  value={question}
-                                  onChange={(event) => setQuestion(event.target.value)}
-                                  placeholder="例如：请求失败后，状态如何恢复？"
-                                  rows={3}
-                                  maxLength={4000}
-                                />
-                                <button
-                                  type="submit"
-                                  className="secondary-button"
-                                  disabled={!question || busy || !status?.subscription}
-                                >
-                                  发送问题
-                                  <Icon name="arrow" size={14} />
-                                </button>
-                              </form>
                             </div>
                           )}
                           <p className="evidence-disclaimer">
-                            引用和变更覆盖已校验；逐条判断以人工记录为准。脚本运行结果不自动证明业务判断。
+                            引用和变更覆盖已校验；逐条判断以人工记录为准。
                           </p>
                         </>
                       ) : (
@@ -3401,211 +3148,6 @@ export function App() {
                           <div className="placeholder-line medium" />
                         </div>
                       )}
-                      {review.answers.length > 0 && (
-                        <section className="detail-section">
-                          <h3>追问记录</h3>
-                          {review.answers.map((item, index) => (
-                            <details
-                              className="answer-item"
-                              key={index}
-                              open={index === review.answers.length - 1}
-                            >
-                              <summary>{item.question}</summary>
-                              <p className="muted small">{item.groupTitle}</p>
-                              <AnswerView
-                                answer={item.answer}
-                                refs={snapshot.refs}
-                                onRef={showRef}
-                              />
-                            </details>
-                          ))}
-                        </section>
-                      )}
-                      {review.guide && (
-                        <section className="detail-section verification-section">
-                          <h3>可复现验证</h3>
-                          <p className="muted small">
-                            仅使用目标 commit 根目录的检查脚本；请人工指定触发条件和预期结果。
-                          </p>
-                          {verificationOptionError ? (
-                            <p className="muted small">{verificationOptionError}</p>
-                          ) : !verificationOptions ? (
-                            <p className="muted small">正在检查隔离环境…</p>
-                          ) : snapshot.mode && snapshot.mode !== 'commits' ? (
-                            <p className="muted small">{verificationOptions.reason}</p>
-                          ) : (
-                            <>
-                              {!verificationOptions.available && (
-                                <p className="muted small">{verificationOptions.reason}</p>
-                              )}
-                              {verificationOptions.scripts.length === 0 && (
-                                <p className="muted small">目标 commit 中没有可选的检查脚本。</p>
-                              )}
-                              <div className="verification-case-scope" role="group" aria-label="判断范围">
-                                <button type="button" aria-pressed={verificationScope === 'related'}
-                                  onClick={() => setVerificationScope('related')}>当前相关 · {relatedCases.length}</button>
-                                <button type="button" aria-pressed={verificationScope === 'all'}
-                                  onClick={() => setVerificationScope('all')}>全部判断 · {verificationCases.length}</button>
-                              </div>
-                              {verificationScope === 'all' ? (
-                                <input className="verification-case-search" aria-label="搜索全部判断"
-                                  value={verificationQuery} onChange={(event) => setVerificationQuery(event.target.value)}
-                                  placeholder="搜索判断标题或内容" />
-                              ) : <p className="muted small">优先显示当前 hunk 的待核对判断；无匹配时显示当前功能。当前范围：{relatedSource}。</p>}
-                              {shownVerificationCases.length === 0 && (
-                                <p className="muted small">{verificationScope === 'related'
-                                  ? '当前范围没有待核对判断；可切换到全部判断搜索。'
-                                  : '没有匹配的判断。'}</p>
-                              )}
-                              <label>
-                                待核对判断
-                                <select
-                                  aria-label="待核对判断"
-                                  value={verificationCaseId}
-                                  onChange={(event) => setVerificationCaseId(event.target.value)}
-                                >
-                                  <option value="">请选择</option>
-                                  {selectedCaseOutsideScope && <option value={selectedVerificationCase.id}>
-                                    已选 · {selectedVerificationCase.title}
-                                  </option>}
-                                  {shownVerificationCases.map((item) => (
-                                      <option key={item.id} value={item.id}>
-                                        {isCaseUnresolved(item) ? '待核对 · ' : ''}
-                                        {item.title}
-                                      </option>
-                                    ))}
-                                </select>
-                              </label>
-                              {verificationCaseId && (
-                                <p className="muted small">
-                                  {
-                                    verificationOptions.cases.find(
-                                      (item) => item.id === verificationCaseId,
-                                    )?.focus
-                                  }
-                                </p>
-                              )}
-                              <label>
-                                执行脚本
-                                <select
-                                  aria-label="执行脚本"
-                                  value={verificationScript}
-                                  onChange={(event) => setVerificationScript(event.target.value)}
-                                >
-                                  <option value="">请选择</option>
-                                  {verificationOptions.scripts.map((item) => (
-                                    <option key={item.name} value={item.name}>
-                                      {item.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                              {verificationScript && (
-                                <p className="muted small verification-command">
-                                  npm run {verificationScript} →{' '}
-                                  {
-                                    verificationOptions.scripts.find(
-                                      (item) => item.name === verificationScript,
-                                    )?.body
-                                  }
-                                </p>
-                              )}
-                              <label>
-                                触发条件
-                                <textarea
-                                  aria-label="验证触发条件"
-                                  value={verificationTrigger}
-                                  onChange={(event) => setVerificationTrigger(event.target.value)}
-                                  rows={2}
-                                  maxLength={2000}
-                                />
-                              </label>
-                              <label>
-                                预期可观察结果
-                                <textarea
-                                  aria-label="预期可观察结果"
-                                  value={verificationExpected}
-                                  onChange={(event) => setVerificationExpected(event.target.value)}
-                                  rows={2}
-                                  maxLength={2000}
-                                />
-                              </label>
-                              <button
-                                className="secondary-button"
-                                disabled={
-                                  !verificationOptions.available ||
-                                  !verificationCaseId ||
-                                  !verificationScript ||
-                                  !verificationTrigger.trim() ||
-                                  !verificationExpected.trim() ||
-                                  verificationTask?.state === 'running'
-                                }
-                                onClick={() => void startVerification()}
-                              >
-                                {verificationTask?.state === 'running'
-                                  ? '隔离验证中…'
-                                  : '运行选定检查'}
-                              </button>
-                            </>
-                          )}
-                          {(review.verificationRecords ?? [])
-                            .slice()
-                            .reverse()
-                            .map((record) => (
-                              <details key={record.id} className="verification-record">
-                                <summary>
-                                  {record.caseTitle} ·{' '}
-                                  {record.timedOut ? '超时' : `退出码 ${record.exitCode ?? '未知'}`}
-                                </summary>
-                                <p className="muted small">
-                                  {record.scriptName} · {record.startedAt} · {short(record.target)}
-                                </p>
-                                <p className="muted small">
-                                  {record.guideFingerprint === review.guideFingerprint
-                                    ? '对应当前导读'
-                                    : '导读已变化，关联待重核'}
-                                </p>
-                                <p>触发：{record.trigger}</p>
-                                <p>预期：{record.expected}</p>
-                                <pre>
-                                  输出：{record.stdout || '无'}
-                                  {'\n'}错误：{record.stderr || '无'}
-                                  {record.outputTruncated ? '\n（输出已截断）' : ''}
-                                </pre>
-                              </details>
-                            ))}
-                        </section>
-                      )}
-                      <section className="detail-section notes-section">
-                        <div className="notes-heading">
-                          <h3>我的理解与笔记</h3>
-                          <span>{file ? '当前文件' : '快照'}</span>
-                        </div>
-                        <textarea
-                          aria-label="我的理解与笔记"
-                          value={note}
-                          onChange={(event) => {
-                            setDrafts((current) => ({
-                              ...current,
-                              [draftKey]: event.target.value,
-                            }));
-                            setNoteFeedback('');
-                          }}
-                          placeholder="记录你的理解、疑问或核实结果…"
-                          rows={4}
-                          maxLength={20000}
-                        />
-                        <div className="note-actions">
-                          <span>{noteChanged ? '尚未保存' : noteFeedback}</span>
-                          <button
-                            className="secondary-button"
-                            disabled={savingNote || !noteChanged}
-                            onClick={() => void saveNote()}
-                          >
-                            {savingNote ? '保存中…' : '保存笔记'}
-                          </button>
-                        </div>
-                      </section>
                       <details className="coverage-details">
                         <summary>
                           上下文范围与限制{' '}
@@ -3618,7 +3160,6 @@ export function App() {
                             <p key={index}>{gap}</p>
                           ),
                         )}
-                        <p>运行记录仅代表所选脚本的结果，不自动证明具体业务判断。</p>
                       </details>
                     </div>
                   </aside>

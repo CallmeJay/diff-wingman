@@ -1,12 +1,42 @@
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ReviewSummary, SavedReview, Snapshot } from '../shared/types.js';
 import { AppError } from './errors.js';
-import { groupHash, guideFingerprint } from './guide.js';
+import { guideFingerprint } from './guide.js';
 
 export class ReviewStore {
   constructor(readonly directory: string) {}
+  private migration?: Promise<void>;
+
+  // 首次访问时原子清除已移除功能的历史字段；快照、评论和逐条判断不变。
+  private ensureMigration(): Promise<void> {
+    this.migration ??= (async () => {
+      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      const files = (await readdir(this.directory)).filter((name) => /^[a-f0-9]{32}\.json$/.test(name));
+      for (const name of files) {
+        const destination = path.join(this.directory, name);
+        const data = JSON.parse(await readFile(destination, 'utf8')) as Record<string, unknown>;
+        if ((data.snapshot as Snapshot | undefined)?.id !== name.slice(0, -5))
+          throw new AppError(500, '本地快照身份不一致，请重新创建快照。');
+        if (!['notes', 'verificationRecords', 'reviewStates', 'answers', 'groupHashes']
+          .some((key) => Object.hasOwn(data, key))) continue;
+        delete data.notes;
+        delete data.verificationRecords;
+        delete data.reviewStates;
+        delete data.answers;
+        delete data.groupHashes;
+        await this.write(destination, data);
+      }
+    })();
+    return this.migration;
+  }
+
+  private async write(destination: string, data: object): Promise<void> {
+    const temporary = `${destination}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(data), { mode: 0o600 });
+    await rename(temporary, destination);
+  }
 
   private file(id: string): string {
     if (!/^[a-f0-9]{32}$/.test(id)) throw new AppError(400, '无效的快照 ID。');
@@ -14,9 +44,11 @@ export class ReviewStore {
   }
 
   async get(id: string): Promise<SavedReview> {
+    const filename = this.file(id);
+    await this.ensureMigration();
     let text: string;
     try {
-      text = await readFile(this.file(id), 'utf8');
+      text = await readFile(filename, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new AppError(404, '未找到此快照。');
@@ -24,19 +56,22 @@ export class ReviewStore {
     }
     const data = JSON.parse(text) as SavedReview;
     if (data.snapshot.id !== id) throw new AppError(500, '本地快照身份不一致，请重新创建快照。');
-    data.groupHashes =
-      data.guide?.groups.map((_group, index) => groupHash(data.guide!, index)) ?? [];
     data.guideFingerprint = data.guide ? guideFingerprint(data.guide) : undefined;
     return data;
   }
 
   // 原子替换避免退出时留下半份 JSON；数据只写入工具目录，不进入被审查仓库。
   async save(review: SavedReview): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await this.ensureMigration();
     const destination = this.file(review.snapshot.id);
-    const temporary = `${destination}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(review), { mode: 0o600 });
-    await rename(temporary, destination);
+    const data = { ...review } as SavedReview & { notes?: unknown; verificationRecords?: unknown;
+      reviewStates?: unknown; answers?: unknown; groupHashes?: unknown };
+    delete data.notes;
+    delete data.verificationRecords;
+    delete data.reviewStates;
+    delete data.answers;
+    delete data.groupHashes;
+    await this.write(destination, data);
   }
 
   async create(snapshot: Snapshot): Promise<SavedReview> {
@@ -57,7 +92,7 @@ export class ReviewStore {
         ? snapshot.refs.filter((ref) => ref.role === 'reference' && !oldRefs.has(ref.id))
         : [];
       if (added.length) {
-        // 同一源码身份的旧快照只补充静态引用，不覆盖原导读、人工记录或笔记。
+        // 同一源码身份的旧快照只补充静态引用，不覆盖原导读或人工记录。
         await this.update(snapshot.id, (review) => {
           const known = new Set(review.snapshot.refs.map((ref) => ref.id));
           review.snapshot.refs.push(...added.filter((ref) => !known.has(ref.id)));
@@ -72,16 +107,13 @@ export class ReviewStore {
     const review: SavedReview = {
       snapshot,
       guide: null,
-      notes: {},
-      answers: [],
-      reviewStates: {},
       claimStates: {},
     };
     await this.save(review);
     return review;
   }
 
-  // 同一快照的写入串行化，笔记和异步 AI 返回不会互相覆盖。
+  // 同一快照的写入串行化，人工状态和异步 AI 返回不会互相覆盖。
   private pending = new Map<string, Promise<void>>();
   async update(id: string, change: (review: SavedReview) => void): Promise<void> {
     const previous = this.pending.get(id) ?? Promise.resolve();
@@ -100,8 +132,30 @@ export class ReviewStore {
     }
   }
 
+  // 删除排在同一快照已提交的写入之后，避免异步保存把已删除的文件重新写回。
+  async delete(id: string): Promise<void> {
+    const destination = this.file(id);
+    await this.ensureMigration();
+    const previous = this.pending.get(id) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      try {
+        await unlink(destination);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+          throw new AppError(404, '未找到此快照。');
+        throw error;
+      }
+    });
+    this.pending.set(id, next);
+    try {
+      await next;
+    } finally {
+      if (this.pending.get(id) === next) this.pending.delete(id);
+    }
+  }
+
   async list(): Promise<ReviewSummary[]> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await this.ensureMigration();
     const files = (await readdir(this.directory)).filter((name) =>
       /^[a-f0-9]{32}\.json$/.test(name),
     );

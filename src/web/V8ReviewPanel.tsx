@@ -87,7 +87,7 @@ export function V8ReviewPanel({ review, changeId, fresh, stale, busy, canGenerat
         </div>
       </div>
       <div className="v8-matrix-table" role="table" aria-label="变更覆盖矩阵">
-        <div role="row" className="v8-matrix-heading"><span>变更</span><span>需求</span><span>AI</span><span>人工理解</span><span>评论</span><span>验证</span></div>
+        <div role="row" className="v8-matrix-heading"><span>变更</span><span>需求</span><span>AI</span><span>人工理解</span><span>评论</span></div>
         {rows.map((row) => <button type="button" role="row" className={row.change.id === active?.change.id ? 'selected' : ''}
           key={row.change.id} ref={row.change.id === active?.change.id ? activeRow : undefined}
           onClick={() => { pendingMatrixChange.current = row.change.id; matrixDialog.current?.close(); }}>
@@ -95,7 +95,6 @@ export function V8ReviewPanel({ review, changeId, fresh, stale, busy, canGenerat
           <span data-label="需求">{row.requirementIds.length ? row.requirementIds.join(', ') : '未关联'}</span>
           <span data-label="AI">{analysisLabel[row.analysis]}</span><span data-label="人工理解">{shownStatus(row.understandingStatus)}</span>
           <span data-label="评论">{row.unresolvedComments}/{row.comments}{row.fileComments ? ` + 文件 ${row.fileComments}` : ''}</span>
-          <span data-label="验证">{row.verifications.length}</span>
         </button>)}
       </div>
       {rows.some((row) => row.analysis === 'unreviewed' || row.analysis === 'not_generated') &&
@@ -118,11 +117,6 @@ export function V8ReviewPanel({ review, changeId, fresh, stale, busy, canGenerat
         <EvidenceRows review={review} title="调用与状态影响" items={currentCard.impacts} onSource={onSource} />
         <EvidenceRows review={review} title="失败路径" items={currentCard.failures} onSource={onSource} />
         <EvidenceRows review={review} title="测试源码线索" items={currentCard.tests} onSource={onSource} />
-        <div className="v8-evidence-section"><strong>当前快照的运行记录</strong>
-          {active.verifications.length ? active.verifications.map((record) => <p className="v8-run-record" key={record.id}>
-            {record.caseTitle} · {record.timedOut ? '超时' : `退出码 ${record.exitCode ?? '未知'}`} · {record.finishedAt}
-          </p>) : <p className="v8-run-record">暂无与此块关联的运行记录。</p>}
-        </div>
         <EvidenceRows review={review} title="缺少的证据" items={currentCard.pending} onSource={onSource} />
       </>}
       {!currentCard && !active.file.issue && active.change.id.includes(':hunk-') && onGenerateHunk &&

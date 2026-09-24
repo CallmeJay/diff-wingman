@@ -114,15 +114,6 @@ test('HTTP 端到端：来源保护、真实快照、导读持久化、取消和
   assert.ok(invocation!.options.prompt.includes(snapshot.target));
   assert.match(invocation!.options.prompt, /Restore pending state after failed requests/);
   assert.equal((await request(`/api/reviews/${snapshot.id}/guide`, 'POST')).status, 409);
-  assert.equal(
-    (
-      await request(`/api/reviews/${snapshot.id}/notes`, 'PUT', {
-        key: 'overview',
-        text: '已核对异常传播',
-      })
-    ).status,
-    200,
-  );
   invocation!.resolve(guide);
   async function waitTask(taskId: string) {
     for (let count = 0; count < 50; count++) {
@@ -136,7 +127,6 @@ test('HTTP 端到端：来源保护、真实快照、导读持久化、取消和
   }
   assert.equal((await waitTask(task.id)).state, 'completed');
   const saved = await store.get(snapshot.id);
-  assert.equal(saved.notes.overview, '已核对异常传播');
   assert.equal(saved.guide?.groups[0].after.text, statement.text);
   assert.deepEqual(saved.commitContext?.messages.map((item) => item.subject), ['Restore pending state after failed requests']);
   const next = (await request(`/api/reviews/${snapshot.id}/guide`, 'POST').then((response) =>
@@ -155,20 +145,8 @@ test('HTTP 端到端：来源保护、真实快照、导读持久化、取消和
   invocation!.resolve(invalid);
   assert.equal((await waitTask(bad.id)).state, 'failed');
   assert.deepEqual((await store.get(snapshot.id)).guide, saved.guide);
-  const followup = (await request(`/api/reviews/${snapshot.id}/questions`, 'POST', {
-    groupIndex: 0,
-    question: '异常还会抛出吗？',
-  }).then((response) => response.json())) as TaskStatus;
-  invocation!.resolve({ statements: [statement], openQuestions: [] });
-  assert.equal((await waitTask(followup.id)).state, 'completed');
-  assert.equal((await store.get(snapshot.id)).answers[0].question, '异常还会抛出吗？');
-  assert.equal(
-    (
-      await request(`/api/reviews/${snapshot.id}/notes`, 'PUT', {
-        key: '__proto__',
-        text: 'unsafe',
-      })
-    ).status,
-    400,
-  );
+  assert.equal((await request(`/api/reviews/${snapshot.id}/questions`, 'POST', { groupIndex: 0, question: '旧版追问' })).status, 404);
+  assert.equal((await request(`/api/reviews/${snapshot.id}/notes`, 'PUT', { key: 'overview', text: '旧版笔记' })).status, 404);
+  assert.equal((await request(`/api/reviews/${snapshot.id}/verification-options`)).status, 404);
+  assert.equal((await request(`/api/reviews/${snapshot.id}/verifications`, 'POST', {})).status, 404);
 });

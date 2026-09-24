@@ -1,7 +1,7 @@
 {
   "name": "diff-wingman",
   "productName": "Diff Wingman",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -22,8 +22,6 @@
     "check:server": "node --import tsx --test tests/server.test.ts",
     "check:v2": "node --import tsx --test tests/live.test.ts tests/v2-server.test.ts",
     "check:v3": "node --import tsx --test tests/v3-symbols.test.ts tests/v3-report.test.ts",
-    "check:v4": "node --import tsx --test tests/v4-verification.test.ts",
-    "check:v4:docker": "node --import tsx --test tests/v4-docker-live.test.ts",
     "check:v5": "node --import tsx --test tests/v5-gitlab.test.ts",
     "check:v6": "node --import tsx --test tests/v6-review-core.test.ts",
     "check:v7": "node --import tsx --test tests/v7-incremental.test.ts",

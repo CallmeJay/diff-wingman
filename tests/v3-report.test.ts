@@ -85,6 +85,7 @@ test('逐条人工判断和报告保持快照、导读、证据边界', async (t
   assert.match(reportBefore.body.markdown, /修复 \\#失败/);
   assert.match(reportBefore.body.markdown, /未审查/);
   assert.match(reportBefore.body.markdown, /不代表自动审查通过/);
+  assert.doesNotMatch(reportBefore.body.markdown, /分组人工状态|隔离执行记录|脚本运行证据|追问记录/);
   assert.doesNotMatch(reportBefore.body.markdown, /人工状态：人工已确认/);
   assert.equal(
     (

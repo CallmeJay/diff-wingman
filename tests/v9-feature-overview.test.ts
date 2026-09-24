@@ -14,8 +14,8 @@ test('固定提交范围只把可对应的 commit subject 作为导读线索', a
   const snapshot = await createSnapshot(fixture.repo, fixture.base, fixture.target);
   const context = await readCommitContext(snapshot);
   assert.deepEqual(context.messages.map((item) => item.subject), ['Restore pending state after failed requests']);
-  assert.doesNotMatch(buildPrompt(snapshot, undefined, context), /Add initial fixture/);
-  assert.match(buildPrompt(snapshot, undefined, context), /作者意图线索/);
+  assert.doesNotMatch(buildPrompt(snapshot, context), /Add initial fixture/);
+  assert.match(buildPrompt(snapshot, context), /作者意图线索/);
   const reversed = await createSnapshot(fixture.repo, fixture.target, fixture.base);
   assert.deepEqual((await readCommitContext(reversed)).messages, []);
   assert.match((await readCommitContext(reversed)).note!, /祖先/);

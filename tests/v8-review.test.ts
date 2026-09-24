@@ -30,7 +30,7 @@ test('逐块卡只接受当前 hunk 的固定源码、已保存需求和 MR 描�
     unreviewed: [], limitations: [], requirementLinks: [{ requirementId: 'R1',
       statement: { text: '对应需求', basis: 'inference', refIds: [] }, changeIds: changes.map((item) => item.id) }],
     flowSteps: [] }, snapshot);
-  const review: SavedReview = { snapshot, guide, guideFingerprint: guideFingerprint(guide), notes: {}, answers: [],
+  const review: SavedReview = { snapshot, guide, guideFingerprint: guideFingerprint(guide),
     gitlab: { url: 'https://gitlab.example/a/-/merge_requests/1', projectPath: 'a', iid: 1,
       title: '修复等待状态', description: '异常时也重置 pending', versionId: 1,
       baseSha: fixture.base, headSha: fixture.target, startSha: fixture.base, files: [] } };
@@ -66,7 +66,7 @@ test('影响链从固定 Git 树区分调用、数据用途、新增测试并验
   const fixture = await makeFixture(false);
   t.after(fixture.cleanup);
   const snapshot = await createSnapshot(fixture.repo, fixture.base, fixture.target);
-  const review: SavedReview = { snapshot, guide: null, notes: {}, answers: [] };
+  const review: SavedReview = { snapshot, guide: null };
   const result = await buildSymbolImpact(review, { path: 'src/submit.ts', side: 'after', line: 4, startColumn: 23, endColumn: 29 });
   assert.equal(result.selected.name, 'submit');
   assert.ok(result.relations.some((item) => item.kind === 'incoming_call' && item.change === 'unchanged' &&
@@ -108,7 +108,7 @@ test('同名局部符号不合并，无法解析的动态调用只作为候选',
   await fixtureGit(repo, 'commit', '-m', 'Add dynamic call');
   const target = await fixtureGit(repo, 'rev-parse', 'HEAD');
   const snapshot = await createSnapshot(repo, base, target);
-  const review: SavedReview = { snapshot, guide: null, notes: {}, answers: [] };
+  const review: SavedReview = { snapshot, guide: null };
   const variable = await buildSymbolImpact(review, { path: 'src/code.ts', side: 'after', line: 1, startColumn: 33, endColumn: 38 });
   assert.equal(variable.selected.name, 'value');
   assert.ok(variable.nodes.every((node) => !node.id.includes('value@2:')));
@@ -120,7 +120,7 @@ test('同名局部符号不合并，无法解析的动态调用只作为候选',
   await fixtureGit(repo, 'commit', '-m', 'Reorder functions');
   const reordered = await fixtureGit(repo, 'rev-parse', 'HEAD');
   const changed = await createSnapshot(repo, target, reordered);
-  const first = await buildSymbolImpact({ snapshot: changed, guide: null, notes: {}, answers: [] },
+  const first = await buildSymbolImpact({ snapshot: changed, guide: null },
     { path: 'src/code.ts', side: 'after', line: 2, startColumn: 33, endColumn: 38 });
   assert.deepEqual(first.selected.locations.map((loc) => [loc.side, loc.line]), [['after', 2], ['before', 1]]);
   assert.ok(first.relations.some((item) => item.kind === 'return' && item.change === 'unchanged'));
@@ -202,7 +202,7 @@ test('插入无关行后同一直接调用保持为两侧均有', async (t) => {
   await fixtureGit(repo, 'commit', '-m', 'Insert unrelated line');
   const target = await fixtureGit(repo, 'rev-parse', 'HEAD');
   const snapshot = await createSnapshot(repo, base, target);
-  const impact = await buildSymbolImpact({ snapshot, guide: null, notes: {}, answers: [] },
+  const impact = await buildSymbolImpact({ snapshot, guide: null },
     { path: 'code.ts', side: 'after', line: 2, startColumn: 17, endColumn: 23 });
   assert.ok(impact.relations.some((item) => item.kind === 'incoming_call' && item.change === 'unchanged'));
 });

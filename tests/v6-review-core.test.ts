@@ -27,7 +27,7 @@ test('100 文件的状态、筛选与内容身份：旧状态不继承到变化�
   const review: SavedReview = {
     snapshot: { id: 'a'.repeat(32), repo: '/fixture', base: 'base', target: 'target', baseLabel: 'base', targetLabel: 'target', createdAt: '', files, refs: [], gaps: [] },
     guide: { overview: '', groups: [], unreviewed: [{ changeId: files[90].changes[0].id, reason: '未分析' }], limitations: [] },
-    notes: {}, answers: [], fileStates: {},
+    fileStates: {},
     localComments: [{ id: 'one', fileId: files[92].id, fingerprint: fileFingerprint(files[92]), path: files[92].path, side: 'after', line: 1, body: '问题', evidence: '依据', createdAt: '', updatedAt: '' }],
   };
   for (const file of files.slice(0, 60)) review.fileStates![file.id] = { status: 'reviewed', fingerprint: fileFingerprint(file), updatedAt: '' };

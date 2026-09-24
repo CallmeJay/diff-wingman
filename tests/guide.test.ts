@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createSnapshot } from '../src/server/git.js';
-import { buildPrompt, validateGuide, validateAnswer } from '../src/server/guide.js';
+import { buildPrompt, validateGuide } from '../src/server/guide.js';
 import { ReviewStore } from '../src/server/store.js';
 import type { Guide, Snapshot } from '../src/shared/types.js';
 import { makeFixture } from './fixture.js';
@@ -82,12 +82,6 @@ test('导读契约拒绝伪造引用、无证据事实、遗漏与重复变更',
   const ungrounded = structuredClone(guide);
   ungrounded.groups[0].before.refIds = [];
   assert.throws(() => validateGuide(ungrounded, snapshot), /没有源码引用/);
-  assert.throws(() =>
-    validateAnswer(
-      { statements: [{ text: '已验证', basis: 'source', refIds: ['fake'] }], openQuestions: [] },
-      snapshot,
-    ),
-  );
   const prompt = buildPrompt(snapshot);
   assert.match(prompt, /未运行|未执行/);
   assert.ok(prompt.includes(snapshot.base) && prompt.includes(snapshot.target));
@@ -105,30 +99,36 @@ test('不支持的文件只能显式列为未分析', async (t) => {
   assert.throws(() => validateGuide(guide, snapshot), /必须列为未分析/);
 });
 
-test('笔记与导读并发持久化不互相覆盖，版本之间隔离', async (t) => {
+test('旧版笔记、验证、分组状态与追问被永久清除，其他快照数据保留', async (t) => {
   const fixture = await makeFixture(false);
   t.after(fixture.cleanup);
   const directory = await mkdtemp(path.join(tmpdir(), 'review-store-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new ReviewStore(directory);
   const snapshot = await createSnapshot(fixture.repo, fixture.base, fixture.target);
-  await store.create(snapshot);
-  await Promise.all([
-    store.update(snapshot.id, (review) => {
-      review.notes.overview = '人工核实失败路径';
-    }),
-    store.update(snapshot.id, (review) => {
-      review.guide = fixtureGuide(snapshot);
-    }),
-  ]);
+  const review = await store.create(snapshot);
+  review.guide = fixtureGuide(snapshot);
+  review.claimStates = { preserved: { status: 'question', evidence: '仍需检查', guideFingerprint: 'hash', updatedAt: '2026-01-01' } };
+  await store.save(review);
+  const filename = path.join(directory, `${snapshot.id}.json`);
+  const old = JSON.parse(await readFile(filename, 'utf8'));
+  old.notes = { overview: '旧版笔记' };
+  old.verificationRecords = [{ id: 'old-verification' }];
+  old.reviewStates = { old: { status: 'verified', evidence: '旧版依据' } };
+  old.answers = [{ question: '旧版追问', answer: { statements: [], openQuestions: [] } }];
+  old.groupHashes = ['old-hash'];
+  await writeFile(filename, JSON.stringify(old));
   const reopened = await new ReviewStore(directory).get(snapshot.id);
-  assert.equal(reopened.notes.overview, '人工核实失败路径');
-  assert.ok(reopened.guide);
-  assert.equal((await store.create(snapshot)).notes.overview, reopened.notes.overview);
-  const reversed = await store.create(
-    await createSnapshot(fixture.repo, fixture.target, fixture.base),
-  );
-  assert.deepEqual(reversed.notes, {});
+  assert.equal(Object.hasOwn(reopened, 'notes'), false);
+  for (const key of ['verificationRecords', 'reviewStates', 'answers', 'groupHashes'])
+    assert.equal(Object.hasOwn(reopened, key), false);
+  assert.equal(reopened.guide?.overview, review.guide.overview);
+  assert.deepEqual(reopened.claimStates, review.claimStates);
+  const saved = JSON.parse(await readFile(filename, 'utf8'));
+  assert.equal(Object.hasOwn(saved, 'notes'), false);
+  for (const key of ['verificationRecords', 'reviewStates', 'answers', 'groupHashes'])
+    assert.equal(Object.hasOwn(saved, key), false);
+  assert.deepEqual(saved.snapshot, old.snapshot);
   await assert.rejects(store.get('../outside'), /无效/);
 });
 

@@ -34,7 +34,7 @@ function review(id: string, versionId: number, source: ReviewFile): SavedReview 
     baseLabel: 'base', targetLabel: 'head', createdAt: '', files: [source], refs: [], gaps: [] },
     gitlab: { url: mrUrl, projectPath: 'group/project', iid: 7, title: 'Review', versionId,
       baseSha: 'a'.repeat(40), headSha: digest(String(versionId)), startSha: 'a'.repeat(40), files: [] },
-    guide: null, notes: {}, answers: [] };
+    guide: null };
 }
 
 test('只有唯一且逐字相同的 hunk 继承；重复变更内容不迁移评论', () => {

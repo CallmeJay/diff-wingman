@@ -74,7 +74,7 @@ export function formatReviewReport(review: SavedReview, fresh: boolean): string 
     `- 快照：${snapshot.id}`,
     `- 范围：${escapeText(snapshot.baseLabel)} → ${escapeText(snapshot.targetLabel)}`,
     `- 导出时源码状态：${fresh ? '与固定快照一致' : '已变化，旧人工结论待重核'}`,
-    '- 报告性质：导读、人工记录与所选脚本运行证据，不代表自动审查通过或项目整体测试通过',
+    '- 报告性质：导读与人工记录，不代表自动审查通过或项目整体测试通过',
     '',
     '## 需求与变更',
     '',
@@ -126,64 +126,12 @@ export function formatReviewReport(review: SavedReview, fresh: boolean): string 
     if (state) lines.push(`- 人工记录：${escapeText(state.evidence)}`);
     lines.push('');
   }
-  lines.push('## 分组人工状态与笔记', '');
-  for (const [index, group] of guide.groups.entries()) {
-    const hash = review.groupHashes?.[index];
-    const state = hash ? review.reviewStates?.[hash] : undefined;
-    const label = state
-      ? state.status === 'verified'
-        ? '已核实'
-        : state.status === 'understood'
-        ? '已理解'
-        : '有疑问'
-      : '未阅读';
-    lines.push(
-      `- ${escapeText(group.title)}：${state && !fresh ? `旧记录待重核（原${label}）` : label}${
-        state?.evidence ? `；${escapeText(state.evidence)}` : ''
-      }`,
-    );
-  }
-  for (const [key, note] of Object.entries(review.notes))
-    if (note) {
-      const file = key.startsWith('file:')
-        ? snapshot.files.find((item) => item.id === key.slice(5))
-        : undefined;
-      lines.push(`- 笔记 ${escapeText(file?.path ?? key)}：${escapeText(note)}`);
-    }
-  lines.push('');
   const staticRefs = snapshot.refs.filter((ref) => ref.role === 'reference');
   if (staticRefs.length) {
     lines.push('## 跨文件静态引用', '');
     for (const ref of staticRefs) lines.push(`- ${sourceLocation(ref)}：${escapeText(ref.label)}`);
     lines.push('', '静态符号引用不证明运行时可达。', '');
   }
-  lines.push('## 隔离执行记录', '');
-  if (!review.verificationRecords?.length) lines.push('尚未执行验证脚本。', '');
-  for (const record of review.verificationRecords ?? []) {
-    const currentGuide = record.guideFingerprint === review.guideFingerprint;
-    lines.push(
-      `### ${escapeText(record.caseTitle)}`,
-      '',
-      `- 关联判断：${escapeText(record.caseId)}${currentGuide ? '' : '（导读已变化，关联待重核）'}`,
-      `- 触发条件：${escapeText(record.trigger)}`,
-      `- 预期可观察结果：${escapeText(record.expected)}`,
-      `- 固定快照：${record.snapshotId}；目标 commit：${record.target}`,
-      `- 命令：${escapeText(record.command.join(' '))}`,
-      `- commit 中的脚本：${escapeText(record.scriptBody)}`,
-      `- 本地镜像 ID：${escapeText(record.imageId)}`,
-      `- 执行时间：${escapeText(record.startedAt)} 至 ${escapeText(record.finishedAt)}（${
-        record.durationMs
-      } ms）`,
-      `- 退出状态：${
-        record.timedOut ? '超时' : record.exitCode === null ? '未取得退出码' : record.exitCode
-      }`,
-      `- 输出截断：${record.outputTruncated ? '是' : '否'}`,
-      `- 标准输出：${escapeText(record.stdout || '无')}`,
-      `- 标准错误：${escapeText(record.stderr || '无')}`,
-      '',
-    );
-  }
-  lines.push('脚本退出码只表示该命令的运行结果，不证明它覆盖或证实关联判断。', '');
   if (review.gitlab) lines.push('## GitLab MR 评论草稿', '', ...commentDraftLines(review, fresh));
   lines.push('## 尚待处理', '');
   const mapped = new Set(guide.requirementLinks?.flatMap((link) => link.changeIds) ?? []);
@@ -202,12 +150,6 @@ export function formatReviewReport(review: SavedReview, fresh: boolean): string 
   for (const limitation of [...snapshot.gaps, ...guide.limitations])
     lines.push(`- 范围限制：${escapeText(limitation)}`);
   if (!fresh) lines.push('- 源码已变化，所有旧人工结论须在新快照中重新核对。');
-  lines.push(
-    '',
-    review.verificationRecords?.length
-      ? '以上仅记录用户选定脚本在隔离环境中的运行结果；业务判断仍需人工核对。'
-      : '测试源码只用于阅读；本工具未执行被审查项目的测试。',
-    '',
-  );
+  lines.push('', '测试源码只用于阅读；本工具未执行被审查项目的测试。', '');
   return lines.join('\n');
 }
